@@ -312,6 +312,16 @@ def create_proxy_app(settings: Settings) -> FastAPI:
             return _gh_error_response(exc)
         return JSONResponse(_serialize(info))
 
+    @app.get("/gh/v1/closing_prs")
+    async def list_closing_prs(request: Request, repo: str, number: int) -> JSONResponse:
+        await _authenticate(request)
+        github: GitHubClient = request.app.state.github
+        try:
+            prs = await github.list_closing_pull_requests(repo, number)
+        except GitHubError as exc:
+            return _gh_error_response(exc)
+        return JSONResponse({"pr_numbers": list(prs)})
+
     @app.get("/gh/v1/pull_request")
     async def get_pull_request(request: Request, repo: str, number: int) -> JSONResponse:
         await _authenticate(request)

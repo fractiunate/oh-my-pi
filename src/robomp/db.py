@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -612,6 +612,29 @@ class Database:
             )
             for r in rows
         ]
+
+    def processed_issue_keys(self, keys: Iterable[str]) -> set[str]:
+        """Return the subset of `keys` that have a row in the `issues` table.
+
+        Membership in `issues` means robomp has at minimum upserted state for the
+        issue — i.e. it has been picked up by the dispatcher at least once. Used
+        by the browse panel to hide issues we've already started on.
+        """
+        unique = tuple({k for k in keys if k})
+        if not unique:
+            return set()
+        # SQLite parameter limit is 999 by default; chunk to stay well under it.
+        out: set[str] = set()
+        with self._lock:
+            for start in range(0, len(unique), 500):
+                batch = unique[start : start + 500]
+                placeholders = ",".join("?" * len(batch))
+                rows = self._conn.execute(
+                    f"SELECT key FROM issues WHERE key IN ({placeholders})",
+                    batch,
+                ).fetchall()
+                out.update(r["key"] for r in rows)
+        return out
 
     # ---- tool_calls ----
     def log_tool_call(

@@ -203,6 +203,55 @@ def test_rename_workspace_branch_surfaces_git_failure(tmp_path: Path) -> None:
     assert ws.branch == initial
 
 
+def test_delete_bad_refs_removes_worktree_holding_the_ref(tmp_path: Path) -> None:
+    """When a bad-object ref is still checked out by a worktree, the worktree's
+    stale ``HEAD`` keeps fetch failing even after ``update-ref -d`` succeeds.
+    The repair MUST also tear down that worktree before deleting the ref."""
+    from robomp.git_ops import _delete_bad_refs
+
+    pool = tmp_path / "pool"
+    _init_worktree_repo(pool, "main")
+
+    # Create a worktree on `farm/badhex/bad-branch`.
+    work_dir = tmp_path / "worktree"
+    subprocess.run(
+        ["git", "worktree", "add", "-b", "farm/badhex/bad-branch", str(work_dir), "main"],
+        cwd=str(pool),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert (work_dir / ".git").exists()
+
+    fetch_output = (
+        "error: object directory /tmp/git-objects-aux does not exist; check .git/objects/info/alternates\n"
+        "fatal: bad object refs/heads/farm/badhex/bad-branch\n"
+        "error: did not send all necessary objects\n"
+    )
+    changed = _delete_bad_refs(pool, fetch_output)
+    assert changed is True
+    # Ref must be gone from the pool's refs store.
+    rp = subprocess.run(
+        ["git", "rev-parse", "--verify", "refs/heads/farm/badhex/bad-branch"],
+        cwd=str(pool),
+        capture_output=True,
+        text=True,
+    )
+    assert rp.returncode != 0
+    # And the worktree's `.git` link must be cleared so the next fetch can
+    # validate connectivity without re-tripping over the dead HEAD.
+    assert not (work_dir / ".git").exists()
+
+
+def test_delete_bad_refs_noop_when_no_bad_ref_in_output(tmp_path: Path) -> None:
+    from robomp.git_ops import _delete_bad_refs
+
+    pool = tmp_path / "pool"
+    _init_worktree_repo(pool, "main")
+    # Output that doesn't match the bad-object regex.
+    assert _delete_bad_refs(pool, "fatal: unrelated failure\n") is False
+
+
 def test_ensure_workspace_creates_worktree(tmp_path: Path, upstream_repo: Path) -> None:
     mgr = SandboxManager(tmp_path / "workspaces")
     ws = mgr.ensure_workspace(
@@ -542,6 +591,7 @@ def test_ensure_workspace_existing_branch_starts_from_remote_head(tmp_path: Path
 
     assert ws.branch == branch
     assert (ws.repo_dir / "README.md").read_text(encoding="utf-8") == "from pr branch\n"
+
 
 def test_remove_workspace(tmp_path: Path, upstream_repo: Path) -> None:
     mgr = SandboxManager(tmp_path / "workspaces")

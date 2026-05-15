@@ -176,6 +176,15 @@ _INDEX_TEMPLATE = """<!doctype html>
   .browse-row .meta .label { background: var(--panel-2); border: 1px solid var(--border);
     border-radius: 3px; padding: 0 6px; color: #b6bcc6; }
   .browse-row .actions { display: flex; gap: 6px; }
+  .browse-row.processed { opacity: 0.55; }
+  .browse-row.processed .title a { color: #8a92a0; }
+  .browse-row .meta .processed-tag {
+    background: rgba(59,130,246,0.12); border: 1px solid rgba(59,130,246,0.35);
+    color: #93b8ef; border-radius: 3px; padding: 0 6px; font-size: 10px;
+    text-transform: uppercase; letter-spacing: 0.4px; }
+  .trigger-toolbar label.toggle { display: inline-flex; align-items: center; gap: 5px;
+    color: var(--muted); font-size: 12px; user-select: none; cursor: pointer; }
+  .trigger-toolbar label.toggle input { margin: 0; }
   .browse-err { padding: 6px 14px; color: var(--err); font-size: 12px;
     border-bottom: 1px solid #1a1d22; background: rgba(248,113,113,0.06); }
   @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
@@ -213,6 +222,7 @@ _INDEX_TEMPLATE = """<!doctype html>
         <option value="all">all</option>
       </select>
       <input id="b-filter" type="text" placeholder="filter title or repo" autocomplete="off" />
+      <label class="toggle"><input id="b-hide-processed" type="checkbox" checked /> hide processed</label>
       <button id="b-refresh">Refresh</button>
       <span class="muted" id="b-meta"></span>
     </div>
@@ -569,23 +579,32 @@ async function loadBrowse(forceRefresh = false) {
 function renderBrowse() {
   const { issues, errors, repos } = browseCache;
   const filter = $("b-filter").value.trim().toLowerCase();
+  const hideProcessed = $("b-hide-processed").checked;
+  const processedCount = issues.reduce((n, i) => n + (i.processed ? 1 : 0), 0);
+  const afterProcessed = hideProcessed ? issues.filter((i) => !i.processed) : issues;
   const filtered = filter
-    ? issues.filter((i) => (i.repo + " " + i.title + " #" + i.number).toLowerCase().includes(filter))
-    : issues;
+    ? afterProcessed.filter((i) => (i.repo + " " + i.title + " #" + i.number).toLowerCase().includes(filter))
+    : afterProcessed;
   const errBlocks = errors.map((e) =>
     `<div class="browse-err">${esc(e.repo)}: ${esc(e.error)}</div>`).join("");
   if (!filtered.length) {
-    $("b-list").innerHTML = errBlocks + '<div class="empty">no issues</div>';
+    const note = hideProcessed && processedCount && processedCount === issues.length
+      ? `<div class="empty">all ${processedCount} issues already processed — uncheck "hide processed" to see them</div>`
+      : '<div class="empty">no issues</div>';
+    $("b-list").innerHTML = errBlocks + note;
   } else {
     const rows = filtered.map((i) => {
       const labels = (i.labels || []).slice(0, 6).map((l) =>
         `<span class="label">${esc(l)}</span>`).join("");
       const ref = `${i.repo}#${i.number}`;
-      return `<div class="browse-row">
+      const rowCls = i.processed ? "browse-row processed" : "browse-row";
+      const processedTag = i.processed ? '<span class="processed-tag">processed</span>' : "";
+      return `<div class="${rowCls}">
         <div>
           <div class="title"><a href="${esc(i.html_url)}" target="_blank" rel="noopener">${esc(ref)}</a> ${esc(i.title)}</div>
           <div class="meta">
             <span><span class="pill ${i.state === "open" ? "queued" : "done"}">${esc(i.state)}</span></span>
+            ${processedTag}
             <span>by ${esc(i.author || "—")}</span>
             <span>updated ${esc(fmtAge(i.updated_at))}</span>
             <span>${i.comments} comments</span>
@@ -603,12 +622,14 @@ function renderBrowse() {
   const repoLabel = repos.length ? repos.join(", ") : "(allowlist empty)";
   const age = browseCache.when ? fmtDuration((Date.now() - browseCache.when) / 1000) + " ago" : "";
   const source = browseCache.cache && browseCache.cache.hit ? "cached" : "loaded";
-  $("b-meta").textContent = `${filtered.length}/${issues.length} from ${repoLabel}${age ? " · " + source + " " + age : ""}`;
+  const hidden = hideProcessed && processedCount ? ` · ${processedCount} processed hidden` : "";
+  $("b-meta").textContent = `${filtered.length}/${issues.length} from ${repoLabel}${age ? " · " + source + " " + age : ""}${hidden}`;
 }
 
 $("b-refresh").addEventListener("click", () => loadBrowse(true));
 $("b-state").addEventListener("change", () => loadBrowse());
 $("b-filter").addEventListener("input", renderBrowse);
+$("b-hide-processed").addEventListener("change", renderBrowse);
 $("b-list").addEventListener("click", (ev) => {
   const tri = ev.target.closest("button[data-triage]");
   const ret = ev.target.closest("button[data-retry-issue]");

@@ -159,6 +159,11 @@ class GitHubProxyClient:
         data = await self._request("GET", "/gh/v1/issue", params={"repo": repo, "number": number})
         return _issue_from(data)
 
+    async def list_closing_pull_requests(self, repo: str, number: int) -> tuple[int, ...]:
+        data = await self._request("GET", "/gh/v1/closing_prs", params={"repo": repo, "number": number})
+        items = data.get("pr_numbers") if isinstance(data, dict) else None
+        return tuple(int(n) for n in items or () if isinstance(n, int))
+
     async def get_pull_request(self, repo: str, number: int) -> PullRequestInfo:
         data = await self._request("GET", "/gh/v1/pull_request", params={"repo": repo, "number": number})
         return _pr_from(data)

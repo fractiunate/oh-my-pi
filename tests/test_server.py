@@ -1247,6 +1247,93 @@ def test_browse_rejects_bad_state(env, monkeypatch: pytest.MonkeyPatch) -> None:
     assert resp.status_code == 400
 
 
+def test_browse_marks_processed_issues_present_in_db(env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The /api/github/issues payload tags every issue with `processed`,
+    derived live from the `issues` table so freshly-triaged work disappears
+    from the "fresh issues" filter without invalidating the GitHub cache."""
+    token = _enable_replay(monkeypatch)
+    cfg = Settings()  # type: ignore[call-arg]
+    cfg.ensure_paths()
+
+    # Seed: issue #7 was previously picked up; #8 is brand new.
+    db = get_database(cfg.sqlite_path)
+    db.upsert_issue(
+        key=issue_key("octo/widget", 7),
+        repo="octo/widget",
+        number=7,
+        state="opened",
+    )
+
+    transport = _make_issues_handler(
+        {
+            "octo/widget": [
+                _issue_payload(7, "already triaged", updated_at="2026-05-14T10:00:00Z"),
+                _issue_payload(8, "fresh", updated_at="2026-05-14T11:00:00Z"),
+            ],
+        },
+        expected_limit=20,
+    )
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        _install_github_mock(app, transport)
+        resp = client.get(
+            "/api/github/issues?state=open&limit=20",
+            headers={"X-Robomp-Replay-Token": token},
+        )
+    close_database()
+
+    assert resp.status_code == 200, resp.text
+    by_number = {i["number"]: i for i in resp.json()["issues"]}
+    assert by_number[7]["processed"] is True
+    assert by_number[8]["processed"] is False
+
+
+def test_browse_processed_flag_is_recomputed_on_cache_hit(env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Even when the GitHub cache is reused, `processed` reflects the current DB
+    so a triage that lands between two dashboard polls hides the entry on the
+    next refresh without forcing a GitHub round-trip."""
+    token = _enable_replay(monkeypatch)
+    cfg = Settings()  # type: ignore[call-arg]
+    cfg.ensure_paths()
+
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json=[_issue_payload(9, "fresh")])
+
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        _install_github_mock(app, httpx.MockTransport(handler))
+        first = client.get(
+            "/api/github/issues?state=open&limit=20",
+            headers={"X-Robomp-Replay-Token": token},
+        )
+        assert first.status_code == 200
+        assert first.json()["issues"][0]["processed"] is False
+
+        # Simulate a triage landing between two dashboard polls.
+        get_database(cfg.sqlite_path).upsert_issue(
+            key=issue_key("octo/widget", 9),
+            repo="octo/widget",
+            number=9,
+            state="reproducing",
+        )
+
+        second = client.get(
+            "/api/github/issues?state=open&limit=20",
+            headers={"X-Robomp-Replay-Token": token},
+        )
+    close_database()
+
+    # GitHub was hit only once; the cached entry served the second call.
+    assert calls == 1
+    body = second.json()
+    assert body["cache"]["hit"] is True
+    assert body["issues"][0]["processed"] is True
+
+
 # -------- maintainer directives ----------------------------------------
 
 

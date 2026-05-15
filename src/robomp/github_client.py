@@ -198,6 +198,44 @@ class GitHubClient:
         data = await self.request("GET", f"/repos/{repo}/issues/{number}")
         return _issue_from_payload(repo, data)
 
+    async def list_closing_pull_requests(self, repo: str, number: int) -> tuple[int, ...]:
+        """Return PR numbers currently linked to issue ``number`` via "Closes"/"Fixes"
+        keywords or the Development panel.
+
+        Walks ``GET /repos/{repo}/issues/{N}/timeline`` and computes net
+        ``connected`` − ``disconnected`` events for sources that are pull
+        requests. Only PRs whose timeline source carries ``state == "open"``
+        are returned — a merged or closed PR no longer needs the bot's work.
+
+        Pagination intentionally skipped: a just-opened issue has at most a
+        handful of timeline entries, and the bot only consults this on
+        ``issues.opened`` triage.
+        """
+        data = await self.request(
+            "GET",
+            f"/repos/{repo}/issues/{number}/timeline",
+            params={"per_page": 100},
+        )
+        linked: set[int] = set()
+        states: dict[int, str] = {}
+        for event in data or []:
+            if not isinstance(event, Mapping):
+                continue
+            ev = event.get("event")
+            source = event.get("source") or {}
+            src_issue = source.get("issue") if isinstance(source, Mapping) else None
+            if not isinstance(src_issue, Mapping) or "pull_request" not in src_issue:
+                continue
+            pr_number = src_issue.get("number")
+            if not isinstance(pr_number, int):
+                continue
+            states[pr_number] = str(src_issue.get("state") or "open")
+            if ev == "connected":
+                linked.add(pr_number)
+            elif ev == "disconnected":
+                linked.discard(pr_number)
+        return tuple(sorted(n for n in linked if states.get(n, "open") == "open"))
+
     async def get_pull_request(self, repo: str, number: int) -> PullRequestInfo:
         data = await self.request("GET", f"/repos/{repo}/pulls/{number}")
         return _pr_from_payload(repo, data)

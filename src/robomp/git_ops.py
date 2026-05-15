@@ -232,14 +232,77 @@ def _bad_refs_from_fetch_output(output: str) -> tuple[str, ...]:
     return tuple(refs)
 
 
+def _worktrees_holding_refs(repo_dir: Path, refs: tuple[str, ...]) -> dict[str, list[str]]:
+    """Map each ref in ``refs`` to the worktree paths whose ``HEAD`` is on it.
+
+    A worktree that has the soon-to-be-deleted branch checked out keeps a
+    stale ``HEAD`` pointer after ``update-ref -d`` succeeds in the shared
+    refs store. The next ``git fetch`` then re-reports the same "bad object"
+    error because git inspects every worktree's ``HEAD`` for connectivity.
+    Removing the offending worktree (or running ``git worktree remove
+    --force`` on it) clears that pointer so the fetch can recover.
+    """
+    if not refs:
+        return {}
+    proc = _run_git(["worktree", "list", "--porcelain"], cwd=repo_dir, token=None)
+    if proc.returncode != 0:
+        return {}
+    refs_set = set(refs)
+    by_ref: dict[str, list[str]] = {}
+    current: dict[str, str] = {}
+
+    def _flush() -> None:
+        branch = current.get("branch")
+        path = current.get("worktree")
+        if branch in refs_set and path:
+            by_ref.setdefault(branch, []).append(path)
+
+    for line in proc.stdout.splitlines():
+        if not line.strip():
+            _flush()
+            current.clear()
+            continue
+        key, _, val = line.partition(" ")
+        if key and val:
+            current[key] = val
+    _flush()
+    return by_ref
+
+
+def _remove_worktrees(repo_dir: Path, paths: list[str]) -> None:
+    for path in paths:
+        proc = _run_git(["worktree", "remove", "--force", path], cwd=repo_dir, token=None)
+        if proc.returncode != 0:
+            log.warning(
+                "failed to remove worktree during fetch repair",
+                extra={"repo_dir": str(repo_dir), "worktree": path, "stderr": proc.stderr[:500]},
+            )
+            continue
+        log.warning(
+            "removed worktree during fetch repair",
+            extra={"repo_dir": str(repo_dir), "worktree": path},
+        )
+    if paths:
+        _run_git(["worktree", "prune"], cwd=repo_dir, token=None)
+
+
 def _delete_bad_refs(repo_dir: Path, output: str) -> bool:
+    bad_refs = _bad_refs_from_fetch_output(output)
+    if not bad_refs:
+        return False
+    holding = _worktrees_holding_refs(repo_dir, bad_refs)
     changed = False
-    for ref in _bad_refs_from_fetch_output(output):
+    for ref in bad_refs:
+        worktrees = holding.get(ref) or []
+        if worktrees:
+            _remove_worktrees(repo_dir, worktrees)
+            changed = True
         proc = _run_git(["update-ref", "-d", ref], cwd=repo_dir, token=None)
         if proc.returncode == 0:
             changed = True
             log.warning(
-                "deleted invalid git ref during fetch repair", extra={"repo_dir": str(repo_dir), "git_ref": ref}
+                "deleted invalid git ref during fetch repair",
+                extra={"repo_dir": str(repo_dir), "git_ref": ref},
             )
             continue
         log.warning(

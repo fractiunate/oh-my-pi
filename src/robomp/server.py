@@ -186,6 +186,7 @@ def _issue_browse_payload(
     *,
     entry: _IssueBrowseCacheEntry,
     cache_hit: bool,
+    processed_keys: frozenset[str],
 ) -> dict[str, Any]:
     return {
         "issues": [
@@ -200,6 +201,7 @@ def _issue_browse_payload(
                 "updated_at": s.updated_at,
                 "created_at": s.created_at,
                 "html_url": s.html_url,
+                "processed": make_issue_key(s.repo, s.number) in processed_keys,
             }
             for s in entry.issues
         ],
@@ -490,7 +492,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             force=refresh,
             fetch=_fetch,
         )
-        return _issue_browse_payload(entry=entry, cache_hit=cache_hit)
+        # `processed` is not cached: a freshly-triaged issue must immediately
+        # disappear from the "fresh issues" filter on the next dashboard refresh.
+        db: Database = bag["db"]
+        processed = frozenset(db.processed_issue_keys(make_issue_key(s.repo, s.number) for s in entry.issues))
+        return _issue_browse_payload(entry=entry, cache_hit=cache_hit, processed_keys=processed)
 
     @app.post("/api/trigger")
     async def api_trigger(

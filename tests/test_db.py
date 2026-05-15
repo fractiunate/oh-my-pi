@@ -150,6 +150,38 @@ def test_log_tool_call(db: Database) -> None:
     assert row_id > 0
 
 
+def test_processed_issue_keys_returns_only_known(db: Database) -> None:
+    db.upsert_issue(key=issue_key("octo/widget", 1), repo="octo/widget", number=1, state="new")
+    db.upsert_issue(key=issue_key("octo/widget", 2), repo="octo/widget", number=2, state="reproducing")
+    queried = [
+        issue_key("octo/widget", 1),
+        issue_key("octo/widget", 2),
+        issue_key("octo/widget", 3),  # never upserted
+        issue_key("octo/other", 7),  # different repo, never upserted
+    ]
+    result = db.processed_issue_keys(queried)
+    assert result == {issue_key("octo/widget", 1), issue_key("octo/widget", 2)}
+
+
+def test_processed_issue_keys_empty_input(db: Database) -> None:
+    assert db.processed_issue_keys([]) == set()
+    # Empty strings are filtered out, not sent as a parameter.
+    assert db.processed_issue_keys(["", ""]) == set()
+
+
+def test_processed_issue_keys_handles_large_batch(db: Database) -> None:
+    # Confirms the 500-batch chunking path (>500 parameters would otherwise hit
+    # SQLite's SQLITE_MAX_VARIABLE_NUMBER default of 999 on older builds).
+    keys = [issue_key("octo/widget", n) for n in range(1, 750)]
+    # Persist only every 3rd one.
+    for k, n in zip(keys, range(1, 750), strict=True):
+        if n % 3 == 0:
+            db.upsert_issue(key=k, repo="octo/widget", number=n, state="new")
+    result = db.processed_issue_keys(keys + ["bogus#1"])
+    expected = {issue_key("octo/widget", n) for n in range(1, 750) if n % 3 == 0}
+    assert result == expected
+
+
 def test_classification_roundtrip(db: Database) -> None:
     key = issue_key("octo/widget", 7)
     db.upsert_issue(key=key, repo="octo/widget", number=7, state="new")
