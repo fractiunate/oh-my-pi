@@ -17,7 +17,7 @@ function manualClock(): ManualClock {
 		setInterval(handler, intervalMs) {
 			intervals.push(intervalMs);
 			handlers.push(handler);
-			return (handlers.length - 1) as unknown as ReturnType<typeof setInterval>;
+			return (handlers.length - 1) as unknown as Timer;
 		},
 		clearInterval(_handle) {
 			cleared += 1;

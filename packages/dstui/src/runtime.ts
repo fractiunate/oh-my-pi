@@ -46,8 +46,8 @@ export interface InstanceOptions {
 	clock?: TimerClock;
 }
 
-/** Platform timer handle. */
-type TimerHandle = ReturnType<typeof setInterval>;
+/** Platform timer handle returned by `setInterval`. */
+type TimerHandle = Timer;
 
 /** Pluggable timer clock for tests. */
 export interface TimerClock {
