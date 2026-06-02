@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed a module-load crash (`ReferenceError: Cannot access 'evalToolRenderer' before initialization`) triggered whenever `tools/eval` was imported before `tools/renderers`. The eval JS backend statically pulls the agent/task/sdk/extension chain, which re-enters the root barrel → `modes/components` → `tool-execution` → `renderers` while `eval.ts` was still initializing, so `renderers.ts` read `evalToolRenderer` in its TDZ. The eval TUI renderer is now split into a dependency-light `tools/eval-render.ts` that `renderers.ts` imports directly (decoupling pure rendering from the eval runtime); `eval.ts` re-exports `evalToolRenderer`/`EVAL_DEFAULT_PREVIEW_LINES` for compatibility.
+- Fixed legacy Pi extensions losing access to sibling UI assets after `loadLegacyPiModule` mirrors their JS/TS modules into a flat temp dir. Mirrored modules' `__dirname` resolves to the mirror root, so `readFileSync(join(__dirname, "foo.html"))` ENOENTed and consumers silently fell back to "no UI support" paths (e.g. Plannotator auto-approving plans without a review browser). `mirrorLegacyPiFile` now also copies `.html`/`.css` siblings of every mirrored module into the mirror root, scanning each source directory at most once and skipping collisions with `COPYFILE_EXCL` ([#1674](https://github.com/can1357/oh-my-pi/issues/1674)).
 
 ## [15.7.6] - 2026-06-01
 ### Added

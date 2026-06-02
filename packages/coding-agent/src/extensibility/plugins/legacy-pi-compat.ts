@@ -269,7 +269,20 @@ function rewriteBareImportsForLegacyExtension(source: string, importerPath: stri
 interface LegacyPiMirrorState {
 	root: string;
 	seen: Map<string, string>;
+	// Source directories whose sibling assets have already been mirrored. Keyed
+	// by the absolute source directory path; entries are added once the first
+	// module from that directory is mirrored.
+	mirroredAssetDirs: Set<string>;
 }
+
+// Asset extensions copied alongside mirrored JS/TS modules. Legacy Pi
+// extensions load these via `readFileSync(join(__dirname, …))`, and the
+// rewritten module's `__dirname` resolves to the flat mirror root rather than
+// the original source directory. Restricted to known UI asset types to avoid
+// pulling in `package.json`, lockfiles, or VCS metadata from the extension
+// package. Extend cautiously — every entry adds a `readdir` per unique source
+// directory and risks name collisions across siblings in the flat mirror.
+const MIRRORED_ASSET_EXTENSIONS: readonly string[] = [".html", ".css"];
 
 function getMirrorPath(sourcePath: string, state: LegacyPiMirrorState): string {
 	const extension = path.extname(sourcePath) || ".js";
@@ -328,13 +341,54 @@ async function mirrorLegacyPiFile(sourcePath: string, state: LegacyPiMirrorState
 	const raw = await Bun.file(resolvedPath).text();
 	const rewritten = await rewriteLegacyPiImportsForRuntime(raw, resolvedPath, state);
 	await Bun.write(mirrorPath, rewritten);
+	await mirrorSiblingAssets(resolvedPath, state);
 	return mirrorPath;
 }
 
+// Copy known UI asset siblings from a mirrored module's source directory into
+// the flat mirror root so `readFileSync(join(__dirname, "foo.html"))` in
+// rewritten extension code still resolves. Each source directory is scanned
+// at most once per `loadLegacyPiModule` call; collisions in the flat root
+// keep the first-copied bytes (later modules with a same-named sibling lose).
+async function mirrorSiblingAssets(modulePath: string, state: LegacyPiMirrorState): Promise<void> {
+	const sourceDir = path.dirname(modulePath);
+	if (state.mirroredAssetDirs.has(sourceDir)) {
+		return;
+	}
+	state.mirroredAssetDirs.add(sourceDir);
+
+	let entries: string[];
+	try {
+		entries = await fs.readdir(sourceDir);
+	} catch {
+		// Source directory vanished between resolution and scan — nothing to do.
+		return;
+	}
+
+	for (const entry of entries) {
+		const ext = path.extname(entry).toLowerCase();
+		if (!MIRRORED_ASSET_EXTENSIONS.includes(ext)) {
+			continue;
+		}
+		const destination = path.join(state.root, entry);
+		try {
+			// `COPYFILE_EXCL` makes the first writer win deterministically; later
+			// modules with a same-named sibling silently keep the existing copy
+			// instead of corrupting the asset another module is already using.
+			await fs.copyFile(path.join(sourceDir, entry), destination, fs.constants.COPYFILE_EXCL);
+		} catch {
+			// EEXIST (collision) or asset removed mid-scan — non-fatal.
+		}
+	}
+}
 export async function loadLegacyPiModule(resolvedPath: string): Promise<unknown> {
 	const root = path.join(os.tmpdir(), "omp-legacy-pi-file", `entry-${Bun.hash(resolvedPath).toString(36)}`);
 	await fs.rm(root, { recursive: true, force: true });
-	const state: LegacyPiMirrorState = { root, seen: new Map() };
+	const state: LegacyPiMirrorState = {
+		root,
+		seen: new Map(),
+		mirroredAssetDirs: new Set(),
+	};
 	const mirroredEntry = await mirrorLegacyPiFile(resolvedPath, state);
 	return import(`${toImportSpecifier(mirroredEntry)}?mtime=${Date.now()}`);
 }
