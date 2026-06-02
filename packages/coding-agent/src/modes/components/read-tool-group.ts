@@ -3,9 +3,34 @@ import { Container, Text } from "@oh-my-pi/pi-tui";
 import { InternalUrlRouter } from "../../internal-urls";
 import { getLanguageFromPath, theme } from "../../modes/theme/theme";
 import { splitPathAndSel } from "../../tools/path-utils";
-import { extractPartialJsonString, PREVIEW_LIMITS, shortenPath } from "../../tools/render-utils";
+import {
+	extractPartialJsonString,
+	PREVIEW_LIMITS,
+	partialJsonStringFieldIsComplete,
+	shortenPath,
+} from "../../tools/render-utils";
 import { renderCodeCell } from "../../tui";
 import type { ToolExecutionHandle } from "./tool-execution";
+
+const PARTIAL_JSON_READ_TARGET_KEYS = ["path", "file_path"] as const;
+
+function couldBecomeInternalUrl(targetPrefix: string): boolean {
+	const lower = targetPrefix.toLowerCase();
+	if (lower.length === 0) return true;
+	if (lower.includes("://")) return false;
+	return InternalUrlRouter.instance()
+		.schemes()
+		.some(scheme => `${scheme}://`.startsWith(lower));
+}
+
+function extractClassifiablePartialReadTarget(partialJson: string): string | undefined {
+	for (const key of PARTIAL_JSON_READ_TARGET_KEYS) {
+		const target = extractPartialJsonString(partialJson, key);
+		if (target === undefined) continue;
+		if (partialJsonStringFieldIsComplete(partialJson, key) || !couldBecomeInternalUrl(target)) return target;
+	}
+	return undefined;
+}
 
 /**
  * Read calls whose target is resolved through {@link InternalUrlRouter} are
@@ -21,12 +46,12 @@ function readArgsTarget(args: unknown): string | undefined {
 	// Streaming fallback: `event-controller.ts` forwards the raw partialJson
 	// buffer on the args so we can route the read (filesystem vs internal URL)
 	// before the throttled structured `arguments` parse catches up on providers
-	// that stream small tool-call deltas.
+	// that stream small tool-call deltas. Do not classify prefixes that could
+	// still become an internal URL (`s` -> `skill://...`); otherwise the first
+	// partial delta can lock the call into a read group that internal URL reads
+	// intentionally avoid.
 	if (typeof record.__partialJson === "string") {
-		return (
-			extractPartialJsonString(record.__partialJson, "path") ??
-			extractPartialJsonString(record.__partialJson, "file_path")
-		);
+		return extractClassifiablePartialReadTarget(record.__partialJson);
 	}
 	return undefined;
 }

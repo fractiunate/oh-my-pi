@@ -66,6 +66,10 @@ export class InternalUrlRouter {
 		return this.#handlers.has(match[1].toLowerCase());
 	}
 
+	/** Registered internal URL scheme names, excluding the `://` suffix. */
+	schemes(): string[] {
+		return [...this.#handlers.keys()];
+	}
 	/** Schemes whose handler supports host/path autocomplete. */
 	completionSchemes(): string[] {
 		const schemes: string[] = [];

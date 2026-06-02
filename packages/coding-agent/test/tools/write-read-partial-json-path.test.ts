@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	ReadToolGroupComponent,
+	readArgsHaveTarget,
 	readArgsTargetInternalUrl,
 } from "@oh-my-pi/pi-coding-agent/modes/components/read-tool-group";
 import * as themeModule from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -149,6 +150,26 @@ describe("readArgsTargetInternalUrl — partial-json aware", () => {
 	it("recognises an internal URL streamed only via __partialJson", () => {
 		expect(readArgsTargetInternalUrl({ __partialJson: '{"path":"skill://my-skill"' })).toBe(true);
 		expect(readArgsTargetInternalUrl({ __partialJson: '{"file_path":"agent://abc"' })).toBe(true);
+	});
+
+	it("defers incomplete prefixes that could still become an internal URL", () => {
+		for (const prefix of ["s", "skill", "skill:", "skill:/"]) {
+			const args = { __partialJson: `{"path":"${prefix}` };
+			expect(readArgsHaveTarget(args)).toBe(false);
+			expect(readArgsTargetInternalUrl(args)).toBe(false);
+		}
+	});
+
+	it("classifies an internal URL as soon as the scheme delimiter arrives", () => {
+		const args = { __partialJson: '{"path":"skill://' };
+		expect(readArgsHaveTarget(args)).toBe(true);
+		expect(readArgsTargetInternalUrl(args)).toBe(true);
+	});
+
+	it("classifies complete path strings even when they prefix an internal scheme", () => {
+		const args = { __partialJson: '{"path":"skill"' };
+		expect(readArgsHaveTarget(args)).toBe(true);
+		expect(readArgsTargetInternalUrl(args)).toBe(false);
 	});
 
 	it("returns false for a filesystem path streamed only via __partialJson", () => {

@@ -832,6 +832,18 @@ export function extractPartialJsonString(partialJson: string | undefined, key: s
 }
 
 /**
+ * Return true once the closing quote for a string-typed JSON field is present
+ * in an in-flight `partialJson` buffer. Renderers may still display incomplete
+ * fragments, but routing code must know whether a prefix like `skill` is a
+ * complete filesystem path or an incomplete internal URL scheme.
+ */
+export function partialJsonStringFieldIsComplete(partialJson: string | undefined, key: string): boolean {
+	if (!partialJson) return false;
+	const pattern = new RegExp(`"${key}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"`, "u");
+	return pattern.test(partialJson);
+}
+
+/**
  * Read a `path` (or legacy `file_path`) string out of `__partialJson` for
  * renderers that take a `{ path?, file_path?, __partialJson? }` arg shape.
  * Returns the first key with a recoverable value so callers can use it as the
