@@ -1,12 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { Effort, type Model } from "@oh-my-pi/pi-ai";
+import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
 import {
 	expandRoleAlias,
+	findSlowModel,
 	parseModelPattern,
 	parseModelString,
 	resolveAgentModelPatterns,
 	resolveCliModel,
 	resolveModelFromString,
+	type ModelLookupRegistry,
 	resolveModelOverride,
 	resolveModelRoleValue,
 	resolveModelScope,
@@ -221,6 +223,27 @@ const canonicalRegistry = {
 } as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
 
 const allModels = [...mockModels, ...mockOpenRouterModels, ...mockProviderOverlapModels, ...mockCodexOverlapModels];
+
+function opusModel(id: string): Model<Api> {
+	return {
+		id,
+		name: id,
+		api: "anthropic-messages",
+		provider: "anthropic",
+		baseUrl: "https://api.anthropic.com",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
+		contextWindow: 200000,
+		maxTokens: 8192,
+	};
+}
+
+function registryFor(models: Model<Api>[]): ModelLookupRegistry {
+	return {
+		getAvailable: () => models,
+	};
+}
 
 describe("parseModelPattern", () => {
 	describe("simple patterns without colons", () => {
@@ -546,6 +569,26 @@ describe("resolveAgentModelPatterns", () => {
 		});
 
 		expect(result).toEqual(["openai/gpt-4o"]);
+	});
+});
+
+describe("findSlowModel", () => {
+	test("prefers Claude Opus 4.8 over older Opus aliases", async () => {
+		const model = await findSlowModel(
+			registryFor([
+				opusModel("claude-opus-4-7"),
+				opusModel("claude-opus-4-8"),
+				opusModel("claude-opus-4-6"),
+			]),
+		);
+
+		expect(model?.id).toBe("claude-opus-4-8");
+	});
+
+	test("prefers Claude Opus 4.7 over older Opus aliases when 4.8 is unavailable", async () => {
+		const model = await findSlowModel(registryFor([opusModel("claude-opus-4.7"), opusModel("claude-opus-4-6")]));
+
+		expect(model?.id).toBe("claude-opus-4.7");
 	});
 });
 
