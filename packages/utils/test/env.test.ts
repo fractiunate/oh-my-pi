@@ -91,7 +91,7 @@ describe("project .env loading", () => {
 	it("omits project variables from the process and subprocess environment when opted out", () => {
 		const cwd = makeTempProjectEnv("PROJECT_ONLY=from-project\n");
 
-		expect(runEnvProbe(cwd, { OMP_NO_PROJECT_ENV: "1" }, true)).toBe(
+		expect(runEnvProbe(cwd, { OMP_NO_PROJECT_ENV: "1" }, false)).toBe(
 			"process=missing\nchild=missing\nalias=missing\n",
 		);
 	});

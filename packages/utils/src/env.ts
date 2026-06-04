@@ -5,7 +5,6 @@ import { getAgentDir, getConfigRootDir } from "./dirs";
 
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-const PROJECT_ENV_OPT_OUT_NAME = "OMP_NO_PROJECT_ENV";
 const TRUTHY: Dict<boolean> = {
 	"1": true,
 	Y: true,
@@ -18,9 +17,6 @@ const TRUTHY: Dict<boolean> = {
 	on: true,
 };
 
-function isTruthyEnv(value: string | undefined): boolean {
-	return value !== undefined && TRUTHY[value] === true;
-}
 /**
  * Strict shell-identifier shape. Used for dotenv keys we accept into
  * `Bun.env` — those should be referenceable as `$NAME` from POSIX shells,
@@ -60,9 +56,10 @@ export function filterProcessEnv(env: Record<string, string | undefined>): Recor
  * Parses a .env file synchronously and extracts key-value string pairs.
  * Ignores lines that are empty or start with '#'. Trims whitespace.
  * Allows values to be quoted with single or double quotes.
+ * Mirrors valid `OMP_` variables to their `PI_` aliases.
  * Returns an object of key-value pairs.
  */
-function parseEnvFileWithoutMirrors(filePath: string): Record<string, string> {
+export function parseEnvFile(filePath: string): Record<string, string> {
 	const result: Record<string, string> = {};
 	try {
 		const content = fs.readFileSync(filePath, "utf-8");
@@ -91,55 +88,14 @@ function parseEnvFileWithoutMirrors(filePath: string): Record<string, string> {
 		// File doesn't exist or can't be read - return empty result
 	}
 
-	return result;
-}
-
-function mirrorOmpEnv(result: Record<string, string>): Record<string, string> {
 	// OMP_ overrides PI_
 	for (const k in result) {
 		if (k.startsWith("OMP_")) {
 			result[`PI_${k.slice(4)}`] = result[k];
 		}
 	}
+
 	return result;
-}
-
-/**
- * Parses a .env file and mirrors valid `OMP_` variables to their `PI_` aliases.
- */
-export function parseEnvFile(filePath: string): Record<string, string> {
-	return mirrorOmpEnv(parseEnvFileWithoutMirrors(filePath));
-}
-
-// Eagerly parse the user's $HOME/.env and the current project's .env (from cwd)
-const homeEnv = parseEnvFile(path.join(os.homedir(), ".env"));
-const piEnv = parseEnvFile(path.join(getConfigRootDir(), ".env"));
-const agentEnv = parseEnvFile(path.join(getAgentDir(), ".env"));
-const projectEnvPath = path.join(process.cwd(), ".env");
-const projectEnv = parseEnvFileWithoutMirrors(projectEnvPath);
-const shouldLoadProjectEnv = !isTruthyEnv(Bun.env[PROJECT_ENV_OPT_OUT_NAME]);
-
-for (const key of Object.keys(Bun.env)) {
-	const value = Bun.env[key];
-	if (!isSafeEnvName(key) || value === undefined || !isSafeEnvValue(value)) {
-		delete Bun.env[key];
-	}
-}
-
-if (!shouldLoadProjectEnv) {
-	for (const key in projectEnv) {
-		if (key !== PROJECT_ENV_OPT_OUT_NAME && Bun.env[key] === projectEnv[key]) {
-			delete Bun.env[key];
-		}
-	}
-}
-
-for (const file of [shouldLoadProjectEnv ? mirrorOmpEnv(projectEnv) : {}, agentEnv, piEnv, homeEnv]) {
-	for (const key in file) {
-		if (!Bun.env[key]) {
-			Bun.env[key] = file[key];
-		}
-	}
 }
 
 /**
@@ -151,6 +107,38 @@ for (const file of [shouldLoadProjectEnv ? mirrorOmpEnv(projectEnv) : {}, agentE
  */
 export const $env: Record<string, string> = Bun.env as Record<string, string>;
 
+export function $flag(name: string, def: boolean = false): boolean {
+	const value = $env[name];
+	if (!value) return def;
+	return TRUTHY[value] === true;
+}
+
+// Eagerly parse the user's $HOME/.env and the current project's .env (from cwd).
+// `OMP_NO_PROJECT_ENV=1` opts out of merging `$PWD/.env` into omp's process
+// (and therefore every bash-tool subprocess). Compiled binaries already pass
+// `--no-compile-autoload-dotenv`, so the flag is a complete off-switch there;
+// source installs may additionally need `bun --no-env-file` (or `bunfig.toml
+// env = false`) because Bun autoloads `$PWD/.env` before any user code runs.
+const homeEnv = parseEnvFile(path.join(os.homedir(), ".env"));
+const piEnv = parseEnvFile(path.join(getConfigRootDir(), ".env"));
+const agentEnv = parseEnvFile(path.join(getAgentDir(), ".env"));
+const projectEnv = $flag("OMP_NO_PROJECT_ENV") ? {} : parseEnvFile(path.join(process.cwd(), ".env"));
+
+for (const key of Object.keys(Bun.env)) {
+	const value = Bun.env[key];
+	if (!isSafeEnvName(key) || value === undefined || !isSafeEnvValue(value)) {
+		delete Bun.env[key];
+	}
+}
+
+for (const file of [projectEnv, agentEnv, piEnv, homeEnv]) {
+	for (const key in file) {
+		if (!Bun.env[key]) {
+			Bun.env[key] = file[key];
+		}
+	}
+}
+
 /**
  * Resolve the first environment variable value from the given keys.
  * @param keys - The keys to resolve.
@@ -158,8 +146,8 @@ export const $env: Record<string, string> = Bun.env as Record<string, string>;
  */
 export function $pickenv(...keys: string[]): string | undefined {
 	for (const key of keys) {
-		const value = Bun.env[key]?.trim();
-		if (value) {
+		const value = $env[key];
+		if (value !== undefined && value !== "") {
 			return value;
 		}
 	}
@@ -174,7 +162,7 @@ export function $envpos(name: string, defaultValue: number): number {
 	const raw = $env[name];
 	if (!raw) return defaultValue;
 	const parsed = Number.parseInt(raw, 10);
-	if (Number.isNaN(parsed) || parsed <= 0) return defaultValue;
+	if (!Number.isFinite(parsed) || parsed <= 0) return defaultValue;
 	return parsed;
 }
 
@@ -195,10 +183,4 @@ export function isCompiledBinary(): boolean {
 	if (Bun.env.PI_COMPILED) return true;
 	const url = import.meta.url;
 	return url.includes("$bunfs") || url.includes("~BUN") || url.includes("%7EBUN");
-}
-
-export function $flag(name: string, def: boolean = false): boolean {
-	const value = $env[name];
-	if (!value) return def;
-	return isTruthyEnv(value);
 }
