@@ -24,11 +24,19 @@ function writeTempEnv(content: string): string {
 	return path.join(makeTempProjectEnv(content), ".env");
 }
 
-function runEnvProbe(cwd: string, env: Record<string, string>, useBunAutoload: boolean): string {
+function runEnvProbe(
+	cwd: string,
+	env: Record<string, string>,
+	useBunAutoload: boolean,
+	homeEnvContent?: string,
+): string {
 	const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-home-"));
 	tempDirs.push(home);
+	if (homeEnvContent !== undefined) {
+		fs.writeFileSync(path.join(home, ".env"), homeEnvContent);
+	}
 	const script = [
-		`await import(${JSON.stringify(envModulePath)});`,
+		`import ${JSON.stringify(envModulePath)};`,
 		`const child = Bun.spawnSync([process.execPath, "--no-env-file", "-e", "console.log(process.env.PROJECT_ONLY ?? 'missing')"], { env: Bun.env, stdout: "pipe", stderr: "pipe" });`,
 		`console.log("process=" + (Bun.env.PROJECT_ONLY ?? "missing"));`,
 		`console.log("child=" + child.stdout.toString().trim());`,
@@ -92,6 +100,14 @@ describe("project .env loading", () => {
 		const cwd = makeTempProjectEnv("PROJECT_ONLY=from-project\n");
 
 		expect(runEnvProbe(cwd, { OMP_NO_PROJECT_ENV: "1" }, false)).toBe(
+			"process=missing\nchild=missing\nalias=missing\n",
+		);
+	});
+
+	it("honors project env opt-out from user env files", () => {
+		const cwd = makeTempProjectEnv("PROJECT_ONLY=from-project\n");
+
+		expect(runEnvProbe(cwd, {}, false, "OMP_NO_PROJECT_ENV=1\n")).toBe(
 			"process=missing\nchild=missing\nalias=missing\n",
 		);
 	});

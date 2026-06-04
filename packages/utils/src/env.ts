@@ -17,6 +17,8 @@ const TRUTHY: Dict<boolean> = {
 	on: true,
 };
 
+const PROJECT_ENV_OPT_OUT_NAME = "OMP_NO_PROJECT_ENV";
+
 /**
  * Strict shell-identifier shape. Used for dotenv keys we accept into
  * `Bun.env` — those should be referenceable as `$NAME` from POSIX shells,
@@ -113,6 +115,17 @@ export function $flag(name: string, def: boolean = false): boolean {
 	return TRUTHY[value] === true;
 }
 
+function seedEnvValue(name: string, files: Record<string, string>[]): void {
+	if ($env[name]) return;
+	for (const file of files) {
+		const value = file[name];
+		if (value) {
+			$env[name] = value;
+			return;
+		}
+	}
+}
+
 // Eagerly parse the user's $HOME/.env and the current project's .env (from cwd).
 // `OMP_NO_PROJECT_ENV=1` opts out of merging `$PWD/.env` into omp's process
 // (and therefore every bash-tool subprocess). Compiled binaries already pass
@@ -122,7 +135,8 @@ export function $flag(name: string, def: boolean = false): boolean {
 const homeEnv = parseEnvFile(path.join(os.homedir(), ".env"));
 const piEnv = parseEnvFile(path.join(getConfigRootDir(), ".env"));
 const agentEnv = parseEnvFile(path.join(getAgentDir(), ".env"));
-const projectEnv = $flag("OMP_NO_PROJECT_ENV") ? {} : parseEnvFile(path.join(process.cwd(), ".env"));
+seedEnvValue(PROJECT_ENV_OPT_OUT_NAME, [agentEnv, piEnv, homeEnv]);
+const projectEnv = $flag(PROJECT_ENV_OPT_OUT_NAME) ? {} : parseEnvFile(path.join(process.cwd(), ".env"));
 
 for (const key of Object.keys(Bun.env)) {
 	const value = Bun.env[key];
