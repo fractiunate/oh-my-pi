@@ -974,6 +974,103 @@ describe("ExtensionRunner", () => {
 			});
 			delete globalState.__ompMemoryStatus;
 		});
+
+		it("exposes a Cognee-shaped memory runtime through the generic ctx.memory API", async () => {
+			// Plan-authorized local widening: `MemoryBackendId` does not yet include
+			// `"cognee"` in this worktree (owned by CogneeBackendAdapter). This const
+			// stands in for that future union member; no production type is altered.
+			const COGNEE = "cognee" as never;
+			const extCode = `
+				export default function(pi) {
+					pi.on("session_start", async (_event, ctx) => {
+						globalThis.__ompCogneeMemory = {
+							status: await ctx.memory.status(),
+							search: await ctx.memory.search("needle", { limit: 1 }),
+							save: await ctx.memory.save("pin this"),
+						};
+					});
+				}
+			`;
+			const explicitExtensionPath = path.join(tempDir.path(), "memory-context-cognee.ts");
+			fs.writeFileSync(explicitExtensionPath, extCode);
+			const globalState = globalThis as typeof globalThis & {
+				__ompCogneeMemory?: { status: unknown; search: unknown; save: unknown };
+			};
+			delete globalState.__ompCogneeMemory;
+
+			const result = await loadTestExtensions([explicitExtensionPath]);
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+				() => ({
+					status: async () => ({
+						backend: COGNEE,
+						active: true,
+						writable: true,
+						searchable: true,
+						scope: "project:oh-my-pi",
+						retainBank: "project:oh-my-pi",
+						recallBanks: ["global:omp", "project:oh-my-pi"],
+					}),
+					search: async query => ({
+						backend: COGNEE,
+						query,
+						count: 1,
+						items: [{ id: "e1", content: "needle result", source: "recall" }],
+					}),
+					save: async () => ({ backend: COGNEE, stored: 1 }),
+				}),
+			);
+			runner.initialize(
+				{
+					sendMessage: () => {},
+					sendUserMessage: () => {},
+					appendEntry: () => {},
+					setLabel: () => {},
+					getActiveTools: () => [],
+					getAllTools: () => [],
+					setActiveTools: async () => {},
+					getCommands: () => [],
+					setModel: async () => false,
+					getThinkingLevel: () => undefined,
+					setThinkingLevel: () => {},
+					getSessionName: () => undefined,
+					setSessionName: async () => {},
+				},
+				{
+					getModel: () => undefined,
+					isIdle: () => true,
+					abort: () => {},
+					hasPendingMessages: () => false,
+					shutdown: () => {},
+					getContextUsage: () => undefined,
+					compact: async () => {},
+					getSystemPrompt: () => [],
+				},
+			);
+
+			await runner.emit({ type: "session_start" });
+
+			const observed = globalState.__ompCogneeMemory;
+			expect(observed).toBeDefined();
+			expect(observed?.status).toMatchObject({
+				backend: "cognee",
+				active: true,
+				writable: true,
+				searchable: true,
+				scope: "project:oh-my-pi",
+			});
+			expect(observed?.search).toMatchObject({
+				backend: "cognee",
+				query: "needle",
+				count: 1,
+			});
+			expect(observed?.save).toMatchObject({ backend: "cognee", stored: 1 });
+			delete globalState.__ompCogneeMemory;
+		});
 	});
 
 	describe("session name API", () => {

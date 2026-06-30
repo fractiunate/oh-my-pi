@@ -1,4 +1,4 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -13,6 +13,8 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 import { removeWithRetries, setProjectDir } from "@oh-my-pi/pi-utils";
+import * as memoryBackend from "@oh-my-pi/pi-coding-agent/memory-backend";
+import type { MemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/types";
 
 interface FakeAcpBuiltinSession {
 	fastMode: boolean;
@@ -1134,5 +1136,188 @@ describe("wave 5 — adapters and polish", () => {
 		} finally {
 			discoverSpy.mockRestore();
 		}
+	});
+});
+
+/**
+ * Plan-authorized local widening: `MemoryBackendId` does not yet include
+ * `"cognee"` in this worktree (owned by CogneeBackendAdapter). This const
+ * stands in for that future union member; no production type is altered.
+ */
+const COGNEE_ID = "cognee" as never;
+
+interface FakeCogneeMemoryHooks {
+	stats?: (agentDir: string, cwd: string, session?: unknown) => Promise<string | undefined>;
+	diagnose?: (agentDir: string, cwd: string, session?: unknown) => Promise<string | undefined>;
+	clear?: (agentDir: string, cwd: string, session?: unknown) => Promise<void>;
+	enqueue?: (agentDir: string, cwd: string, session?: unknown) => Promise<void>;
+}
+
+function createFakeCogneeBackend(hooks: FakeCogneeMemoryHooks = {}): MemoryBackend {
+	const backend = {
+		id: COGNEE_ID,
+		async start() {},
+		async buildDeveloperInstructions() {
+			return undefined;
+		},
+		async clear(agentDir: string, cwd: string, session?: unknown) {
+			await hooks.clear?.(agentDir, cwd, session);
+		},
+		async enqueue(agentDir: string, cwd: string, session?: unknown) {
+			await hooks.enqueue?.(agentDir, cwd, session);
+		},
+		async stats(agentDir: string, cwd: string, session?: unknown) {
+			return hooks.stats?.(agentDir, cwd, session);
+		},
+		async diagnose(agentDir: string, cwd: string, session?: unknown) {
+			return hooks.diagnose?.(agentDir, cwd, session);
+		},
+	};
+	return backend as unknown as MemoryBackend;
+}
+
+describe("ACP /memory — Cognee backend routing", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("/memory stats renders backend-provided markdown", async () => {
+		const { output, runtime } = createRuntime();
+		const backend = createFakeCogneeBackend({
+			stats: async () => "# Cognee Stats\nActive: yes",
+		});
+		vi.spyOn(memoryBackend, "resolveMemoryBackend").mockResolvedValue(backend);
+
+		const result = await executeAcpBuiltinSlashCommand("/memory stats", runtime);
+		expect(result).toEqual({ consumed: true });
+		expect(output.join("\n")).toContain("# Cognee Stats");
+		expect(output.join("\n")).toContain("Active: yes");
+	});
+
+	it("/memory diagnose renders redacted backend markdown and does not leak secrets", async () => {
+		const { output, runtime } = createRuntime();
+		const fakeSecret = "sk-cognee-secret-12345";
+		const backend = createFakeCogneeBackend({
+			diagnose: async () => "API key: present (redacted)\napiUrl: http://localhost:8000",
+		});
+		vi.spyOn(memoryBackend, "resolveMemoryBackend").mockResolvedValue(backend);
+
+		const result = await executeAcpBuiltinSlashCommand("/memory diagnose", runtime);
+		expect(result).toEqual({ consumed: true });
+		const text = output.join("\n");
+		expect(text).toContain("API key: present (redacted)");
+		expect(text).not.toContain(fakeSecret);
+	});
+
+	it("/memory clear calls backend.clear, refreshes the prompt, and uses non-destructive Cognee wording", async () => {
+		const { output, runtime } = createRuntime();
+		const clearCalls: Array<{ agentDir: string; cwd: string; session: unknown }> = [];
+		let refreshCalls = 0;
+		const backend = createFakeCogneeBackend({
+			clear: async (agentDir, cwd, session) => {
+				clearCalls.push({ agentDir, cwd, session });
+			},
+		});
+		vi.spyOn(memoryBackend, "resolveMemoryBackend").mockResolvedValue(backend);
+		spyOn(runtime.session, "refreshBaseSystemPrompt").mockImplementation(async () => {
+			refreshCalls++;
+		});
+
+		const result = await executeAcpBuiltinSlashCommand("/memory clear", runtime);
+		expect(result).toEqual({ consumed: true });
+		expect(clearCalls).toHaveLength(1);
+		expect(clearCalls[0]?.agentDir).toBe(runtime.settings.getAgentDir());
+		expect(clearCalls[0]?.cwd).toBe(runtime.cwd);
+		expect(clearCalls[0]?.session).toBe(runtime.session);
+		expect(refreshCalls).toBe(1);
+		const text = output.join("\n");
+		expect(text).toContain("upstream Cognee datasets were not deleted");
+		expect(text).not.toMatch(/datasets deleted|server data cleared/i);
+	});
+
+	it("/memory reset mirrors clear behavior and wording", async () => {
+		const { output, runtime } = createRuntime();
+		const clearCalls: Array<{ agentDir: string; cwd: string }> = [];
+		let refreshCalls = 0;
+		const backend = createFakeCogneeBackend({
+			clear: async (agentDir, cwd) => {
+				clearCalls.push({ agentDir, cwd });
+			},
+		});
+		vi.spyOn(memoryBackend, "resolveMemoryBackend").mockResolvedValue(backend);
+		spyOn(runtime.session, "refreshBaseSystemPrompt").mockImplementation(async () => {
+			refreshCalls++;
+		});
+
+		await executeAcpBuiltinSlashCommand("/memory reset", runtime);
+		expect(clearCalls).toHaveLength(1);
+		expect(refreshCalls).toBe(1);
+		const text = output.join("\n");
+		expect(text).toContain("upstream Cognee datasets were not deleted");
+	});
+
+	it("/memory enqueue calls backend.enqueue and shows Cognee maintenance wording", async () => {
+		const { output, runtime } = createRuntime();
+		const enqueueCalls: Array<{ agentDir: string; cwd: string }> = [];
+		const backend = createFakeCogneeBackend({
+			enqueue: async (agentDir, cwd) => {
+				enqueueCalls.push({ agentDir, cwd });
+			},
+		});
+		vi.spyOn(memoryBackend, "resolveMemoryBackend").mockResolvedValue(backend);
+
+		await executeAcpBuiltinSlashCommand("/memory enqueue", runtime);
+		expect(enqueueCalls).toHaveLength(1);
+		expect(output.join("\n")).toContain("Cognee memory maintenance enqueued");
+	});
+
+	it("/memory rebuild mirrors enqueue behavior and wording", async () => {
+		const { output, runtime } = createRuntime();
+		const enqueueCalls: Array<{ agentDir: string; cwd: string }> = [];
+		const backend = createFakeCogneeBackend({
+			enqueue: async (agentDir, cwd) => {
+				enqueueCalls.push({ agentDir, cwd });
+			},
+		});
+		vi.spyOn(memoryBackend, "resolveMemoryBackend").mockResolvedValue(backend);
+
+		await executeAcpBuiltinSlashCommand("/memory rebuild", runtime);
+		expect(enqueueCalls).toHaveLength(1);
+		expect(output.join("\n")).toContain("Cognee memory maintenance enqueued");
+	});
+
+	it("/memory mm list remains unsupported in ACP and does not call Cognee hooks", async () => {
+		const { output, runtime } = createRuntime();
+		const statsCalls: number[] = [];
+		const diagnoseCalls: number[] = [];
+		const clearCalls: number[] = [];
+		const enqueueCalls: number[] = [];
+		const backend = createFakeCogneeBackend({
+			stats: async () => {
+				statsCalls.push(1);
+				return undefined;
+			},
+			diagnose: async () => {
+				diagnoseCalls.push(1);
+				return undefined;
+			},
+			clear: async () => {
+				clearCalls.push(1);
+			},
+			enqueue: async () => {
+				enqueueCalls.push(1);
+			},
+		});
+		vi.spyOn(memoryBackend, "resolveMemoryBackend").mockResolvedValue(backend);
+
+		const result = await executeAcpBuiltinSlashCommand("/memory mm list", runtime);
+		expect(result).toEqual({ consumed: true });
+		expect(output.join("\n")).toContain(
+			"Mental-model maintenance via /memory mm is unsupported in ACP mode",
+		);
+		expect(statsCalls).toHaveLength(0);
+		expect(diagnoseCalls).toHaveLength(0);
+		expect(clearCalls).toHaveLength(0);
+		expect(enqueueCalls).toHaveLength(0);
 	});
 });

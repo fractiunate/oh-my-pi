@@ -563,7 +563,11 @@ export class CommandController {
 			try {
 				await backend.clear(agentDir, this.ctx.sessionManager.getCwd(), this.ctx.session);
 				await this.ctx.session.refreshBaseSystemPrompt();
-				this.ctx.showStatus("Memory data cleared and system prompt refreshed.");
+				this.ctx.showStatus(
+					(backend.id as string) === "cognee"
+						? "Cognee memory is server-side; local Cognee session state was cleared and the system prompt was refreshed. Upstream Cognee datasets were not deleted."
+						: "Memory data cleared and system prompt refreshed.",
+				);
 			} catch (error) {
 				this.ctx.showError(`Memory clear failed: ${error instanceof Error ? error.message : String(error)}`);
 			}
@@ -573,7 +577,11 @@ export class CommandController {
 		if (action === "enqueue" || action === "rebuild") {
 			try {
 				await backend.enqueue(agentDir, this.ctx.sessionManager.getCwd(), this.ctx.session);
-				this.ctx.showStatus("Memory consolidation enqueued.");
+				this.ctx.showStatus(
+					(backend.id as string) === "cognee"
+						? "Cognee memory maintenance enqueued."
+						: "Memory consolidation enqueued.",
+				);
 			} catch (error) {
 				this.ctx.showError(`Memory enqueue failed: ${error instanceof Error ? error.message : String(error)}`);
 			}
