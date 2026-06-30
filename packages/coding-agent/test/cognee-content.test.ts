@@ -11,7 +11,7 @@ import {
 
 type AgentMessageForCognee = Parameters<typeof flattenMessagesForCognee>[0][number];
 type TestConfig = Parameters<typeof formatCogneeRecallBlock>[1];
-type TestScope = Parameters<typeof formatCogneeRecallBlock>[2];
+type TestScope = Parameters<typeof prepareCogneeRetentionDocument>[0]["scope"];
 type TestEntry = Parameters<typeof formatCogneeRecallBlock>[0][number];
 
 const asAgentMessage = (message: unknown): AgentMessageForCognee => message as AgentMessageForCognee;
@@ -333,6 +333,26 @@ describe("truncateCogneeRecallQuery", () => {
 		expect(truncated).not.toContain("older");
 	});
 
+	it("does not keep older context when newest context cannot fit", () => {
+		const latest = "latest";
+		const query = composeCogneeRecallQuery(
+			latest,
+			[
+				{ role: "user", content: "short older" },
+				{ role: "assistant", content: "this newest answer is too long for the budget" },
+				{ role: "user", content: latest },
+			],
+			2,
+			globalScope,
+		);
+		const max = "Scope: global:omp\n\nLatest prompt:\nlatest".length + 8;
+		const truncated = truncateCogneeRecallQuery(query, latest, max);
+
+		expect(truncated).not.toContain("short older");
+		expect(truncated).not.toContain("newest answer");
+		expect(truncated).toContain("Latest prompt:\nlatest");
+	});
+
 	it("keeps latest prompt when scope and context cannot fit", () => {
 		const query = composeCogneeRecallQuery(
 			"must survive",
@@ -472,6 +492,12 @@ describe("formatCogneeRecallBlock", () => {
 		expect(block).toContain("Relevant Cognee memories from prior conversations and knowledge graph context.");
 		expect(block).toContain("Current time: 2026-06-30T00:00:00.000Z");
 		expect(block).toContain("Scope: project:oh-my-pi");
+	});
+
+	it("uses the actual current time when no test clock is supplied", () => {
+		const block = formatCogneeRecallBlock([asEntry({ source: "session", id: "entry-1", text: "remember this", raw: {} })], config, scope);
+
+		expect(block).not.toContain("Current time: 1970-01-01T00:00:00.000Z");
 	});
 
 	it("renders configured preamble and source variants with fallbacks", () => {

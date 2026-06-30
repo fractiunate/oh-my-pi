@@ -273,7 +273,8 @@ export function truncateCogneeRecallQuery(query: string, latestPrompt: string, m
 	for (let i = parsed.contextLines.length - 1; i >= 0; i--) {
 		const nextContextLines = [parsed.contextLines[i], ...keptContextLines];
 		const candidate = buildRecallQueryCandidate(scopeLines, nextContextLines, latest, true);
-		if (candidate.length <= maxChars) keptContextLines.unshift(parsed.contextLines[i]);
+		if (candidate.length > maxChars) break;
+		keptContextLines.unshift(parsed.contextLines[i]);
 	}
 
 	const candidate = buildRecallQueryCandidate(scopeLines, keptContextLines, latest, scopeLines.length > 0 || parsed.useLatestSection);
@@ -321,16 +322,19 @@ export function prepareCogneeRetentionDocument(args: {
 	};
 }
 
+type CogneeRecallBlockConfig = Pick<CogneeConfig, "recallPromptPreamble" | "recallMaxRenderChars">;
+type CogneeRecallBlockScope = Pick<CogneeScope, "label" | "retainDatasetLabel" | "recallDatasetLabels">;
+
 export function formatCogneeRecallBlock(
 	entries: CogneeRecallEntry[],
-	config: CogneeConfig,
-	scope: CogneeScope,
+	config: CogneeRecallBlockConfig,
+	scope: CogneeRecallBlockScope,
 	now?: Date,
 ): string | undefined {
 	if (entries.length === 0) return undefined;
 
 	const preamble = config.recallPromptPreamble.trim() || DEFAULT_RECALL_PREAMBLE;
-	const renderedNow = now ?? new Date(0);
+	const renderedNow = now ?? new Date();
 	const header = [
 		"<cognee_memories>",
 		preamble,
