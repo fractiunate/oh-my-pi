@@ -1399,6 +1399,10 @@ const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
 	"hindsight.bankId": () => hindsightScopeSignal.fire(),
 	"hindsight.bankIdPrefix": () => hindsightScopeSignal.fire(),
 	"hindsight.scoping": () => hindsightScopeSignal.fire(),
+	"cognee.datasetName": () => cogneeScopeSignal.fire(),
+	"cognee.datasetId": () => cogneeScopeSignal.fire(),
+	"cognee.datasetNamePrefix": () => cogneeScopeSignal.fire(),
+	"cognee.scoping": () => cogneeScopeSignal.fire(),
 	"worktree.base": value => {
 		const dir = typeof value === "string" && value.trim() ? value : undefined;
 		// Always call so an unset/empty value clears a previously-applied override.
@@ -1444,6 +1448,20 @@ const hindsightScopeSignal = new SettingSignal("hindsight scope");
  * caller is expected to re-read the relevant settings via `Settings.get`.
  */
 export const onHindsightScopeChanged = (cb: () => void) => hindsightScopeSignal.on(cb);
+
+/** Fires when any Cognee dataset/scope selector changes. */
+const cogneeScopeSignal = new SettingSignal("cognee scope");
+
+/**
+ * Subscribe to changes in the Cognee dataset-scoping settings. Lets the
+ * Cognee backend rebuild active session state when the operator switches
+ * `cognee.datasetName`, `cognee.datasetId`, `cognee.datasetNamePrefix`, or
+ * `cognee.scoping` mid-session.
+ *
+ * Returns an unsubscribe function. The callback receives no arguments; the
+ * caller re-reads settings via `Settings.get`.
+ */
+export const onCogneeScopeChanged = (cb: () => void) => cogneeScopeSignal.on(cb);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Global Singleton

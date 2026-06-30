@@ -130,7 +130,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"Git",
 	],
 	context: ["General", "Compaction", "Rules (TTSR)", "Experimental"],
-	memory: ["General", "Auto-Learn", "Mnemopi", "Hindsight"],
+	memory: ["General", "Auto-Learn", "Mnemopi", "Hindsight", "Cognee"],
 	files: ["Editing", "Reading", "Read Summaries", "LSP"],
 	shell: ["Bash", "Eval & Runtimes"],
 	tools: [
@@ -286,6 +286,8 @@ const EMPTY_NUMBER_RECORD: Record<string, number> = {};
 const DEFAULT_CYCLE_ORDER: string[] = ["smol", "default", "slow"];
 const EMPTY_MODEL_TAGS_RECORD: ModelTagsSettings = {};
 const HINDSIGHT_RECALL_TYPES_DEFAULT: string[] = ["world", "experience"];
+const COGNEE_NODE_SET_DEFAULT: string[] = [];
+const COGNEE_ONTOLOGY_KEYS_DEFAULT: string[] = [];
 export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 	{
 		pattern: "^\\s*(cat|head|tail|less|more)\\s+",
@@ -2276,18 +2278,18 @@ export const SETTINGS_SCHEMA = {
 	"memories.summaryInjectionTokenLimit": { type: "number", default: 5000 },
 
 	// Memory backend selector — picks between local memories pipeline,
-	// Mnemopi local SQLite, Hindsight remote memory, or off. Legacy
-	// `memories.enabled` keeps gating the local backend; see config/settings.ts
-	// migration for details.
+	// Mnemopi local SQLite, Hindsight remote memory, Cognee graph memory,
+	// or off. Legacy `memories.enabled` keeps gating the local backend;
+	// see config/settings.ts migration for details.
 	"memory.backend": {
 		type: "enum",
-		values: ["off", "local", "hindsight", "mnemopi"] as const,
+		values: ["off", "local", "hindsight", "mnemopi", "cognee"] as const,
 		default: "off",
 		ui: {
 			tab: "memory",
 			group: "General",
 			label: "Memory Backend",
-			description: "Off, local summary pipeline, Mnemopi SQLite, or Hindsight remote memory",
+			description: "Off, local summary pipeline, Mnemopi SQLite, Hindsight remote memory, or Cognee graph memory",
 			options: [
 				{ value: "off", label: "Off", description: "No memory subsystem runs" },
 				{ value: "local", label: "Local", description: "Local rollout summarisation pipeline (memory_summary.md)" },
@@ -2296,6 +2298,11 @@ export const SETTINGS_SCHEMA = {
 					value: "mnemopi",
 					label: "Mnemopi",
 					description: "Local SQLite recall/retain backend with optional embeddings",
+				},
+				{
+					value: "cognee",
+					label: "Cognee",
+					description: "Cognee graph memory service",
 				},
 			],
 		},
@@ -2719,6 +2726,213 @@ export const SETTINGS_SCHEMA = {
 	"hindsight.mentalModelRefreshIntervalMs": { type: "number", default: 5 * 60 * 1000 },
 	"hindsight.mentalModelMaxRenderChars": { type: "number", default: 16_000 },
 
+
+	// Cognee graph memory backend.
+	"cognee.apiUrl": {
+		type: "string",
+		default: "http://localhost:8000",
+		ui: {
+			tab: "memory",
+			group: "Cognee",
+			label: "Cognee API URL",
+			description: "Cognee server URL (Cloud or self-hosted)",
+			condition: "cogneeActive",
+		},
+	},
+	"cognee.apiKey": { type: "string", default: undefined },
+	"cognee.datasetName": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "memory",
+			group: "Cognee",
+			label: "Cognee Dataset Name",
+			description: "Base dataset name used when no dataset ID is configured",
+			condition: "cogneeActive",
+		},
+	},
+	"cognee.datasetId": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "memory",
+			group: "Cognee",
+			label: "Cognee Dataset ID",
+			description: "Existing Cognee dataset UUID. When set, it wins over dataset name.",
+			condition: "cogneeActive",
+		},
+	},
+	"cognee.datasetNamePrefix": { type: "string", default: undefined },
+	"cognee.scoping": {
+		type: "enum",
+		values: ["global", "per-project", "per-project-tagged"] as const,
+		default: "per-project-tagged",
+		ui: {
+			tab: "memory",
+			group: "Cognee",
+			label: "Cognee Scoping",
+			description:
+				"global = one shared dataset; per-project = isolated dataset per cwd; per-project-tagged = shared dataset with project tags so global + project memories merge on recall",
+			options: [
+				{
+					value: "global",
+					label: "Global",
+					description: "One shared Cognee dataset for every project",
+				},
+				{
+					value: "per-project",
+					label: "Per project",
+					description: "Isolated Cognee dataset per cwd basename",
+				},
+				{
+					value: "per-project-tagged",
+					label: "Per project (tagged)",
+					description:
+						"Shared dataset, retains tagged with project:<cwd>. Recall surfaces project + untagged global memories together",
+				},
+			],
+			condition: "cogneeActive",
+		},
+	},
+	"cognee.autoRecall": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "memory",
+			group: "Cognee",
+			label: "Cognee Auto Recall",
+			description: "Recall Cognee memories into the first turn of each session",
+			condition: "cogneeActive",
+		},
+	},
+	"cognee.autoRetain": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "memory",
+			group: "Cognee",
+			label: "Cognee Auto Retain",
+			description: "Retain completed conversation turns into Cognee memory",
+			condition: "cogneeActive",
+		},
+	},
+	"cognee.retainMode": {
+		type: "enum",
+		values: ["full-session", "last-turn"] as const,
+		default: "full-session",
+		ui: {
+			tab: "memory",
+			group: "Cognee",
+			label: "Cognee Retain Mode",
+			description: "full-session = remember one session document; last-turn = chunked turn retention",
+			options: [
+				{
+					value: "full-session",
+					label: "Full session",
+					description: "Remember one session document (recommended)",
+				},
+				{
+					value: "last-turn",
+					label: "Last turn",
+					description: "Retain chunked turn slices",
+				},
+			],
+			condition: "cogneeActive",
+		},
+	},
+	"cognee.retainEveryNTurns": { type: "number", default: 3 },
+	"cognee.retainOverlapTurns": { type: "number", default: 2 },
+	"cognee.retainContext": { type: "string", default: "omp" },
+	"cognee.runInBackground": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "memory",
+			group: "Cognee",
+			label: "Cognee Background Ingest",
+			description: "Ask Cognee to process remember requests in the background",
+			condition: "cogneeActive",
+		},
+	},
+	"cognee.chunkSize": { type: "number", default: 4096 },
+	"cognee.chunksPerBatch": { type: "number", default: 36 },
+	"cognee.customPrompt": { type: "string", default: undefined },
+	"cognee.nodeSet": { type: "array", default: COGNEE_NODE_SET_DEFAULT },
+	"cognee.ontologyKeys": { type: "array", default: COGNEE_ONTOLOGY_KEYS_DEFAULT },
+	"cognee.graphModel": { type: "string", default: undefined },
+	"cognee.recallSearchType": {
+		type: "string",
+		default: "GRAPH_COMPLETION",
+		ui: {
+			tab: "memory",
+			group: "Cognee",
+			label: "Cognee Recall Search Type",
+			description: "Cognee recall search type, for example GRAPH_COMPLETION, RAG_COMPLETION, CHUNKS, INSIGHTS, or CODE",
+			condition: "cogneeActive",
+		},
+	},
+	"cognee.recallScope": {
+		type: "string",
+		default: "auto",
+		ui: {
+			tab: "memory",
+			group: "Cognee",
+			label: "Cognee Recall Scope",
+			description: "Cognee recall scope, for example auto, graph, session, trace, graph_context, session_context, or all",
+			condition: "cogneeActive",
+		},
+	},
+	"cognee.recallTopK": { type: "number", default: 10 },
+	"cognee.recallContextTurns": { type: "number", default: 1 },
+	"cognee.recallMaxQueryChars": { type: "number", default: 1200 },
+	"cognee.recallMaxRenderChars": { type: "number", default: 12000 },
+	"cognee.onlyContext": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "memory",
+			group: "Cognee",
+			label: "Cognee Context Only",
+			description: "Return context-only recall results when Cognee supports it",
+			condition: "cogneeActive",
+		},
+	},
+	"cognee.verbose": { type: "boolean", default: false },
+	"cognee.improveOnEnqueue": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "memory",
+			group: "Cognee",
+			label: "Cognee Improve on Enqueue",
+			description: "Route /memory enqueue through Cognee improve instead of only local queue state",
+			condition: "cogneeActive",
+		},
+	},
+	"cognee.buildGlobalContextIndex": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "memory",
+			group: "Cognee",
+			label: "Cognee Build Global Context Index",
+			description: "Ask Cognee improve to build the global context index",
+			condition: "cogneeActive",
+		},
+	},
+	"cognee.sessionMemoryEnabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "memory",
+			group: "Cognee",
+			label: "Cognee Session Memory",
+			description:
+				"Forward OMP session IDs to Cognee session-memory APIs. Requires Cognee server caching to be enabled.",
+			condition: "cogneeActive",
+		},
+	},
+	"cognee.debug": { type: "boolean", default: false },
 	// TTSR
 	"ttsr.enabled": {
 		type: "boolean",

@@ -106,6 +106,13 @@ const CONDITIONS: Record<string, () => boolean> = {
 			return false;
 		}
 	},
+	cogneeActive: () => {
+		try {
+			return Settings.instance.get("memory.backend") === "cognee";
+		} catch {
+			return false;
+		}
+	},
 	autolearnActive: () => {
 		try {
 			return Settings.instance.get("autolearn.enabled") === true;
