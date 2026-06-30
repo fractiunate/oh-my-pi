@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:te
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { logger, removeWithRetries } from "@oh-my-pi/pi-utils";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { computeCogneeScope, deriveCogneeDatasetName } from "../src/cognee/scope";
 import type { CogneeConfig } from "../src/cognee/config";
 
@@ -181,34 +181,26 @@ describe("computeCogneeScope", () => {
 			expect(nodeSet).toEqual(original);
 		});
 
-		it("warns and falls back to a global ID target when datasetId is configured", () => {
-			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
-
+		it("derives a project-specific ID target when datasetId is configured", () => {
 			const scope = computeCogneeScope(
 				baseConfig({ scoping: "per-project", datasetId: " ds-123 " }),
 				"/work/cool-app",
 			);
 
-			expect(scope.label).toBe("global:id:ds-123");
-			expect(scope.datasetId).toBe("ds-123");
-			expect(scope.recallDatasetIds).toEqual(["ds-123"]);
+			expect(scope.label).toBe("project:cool-app");
+			expect(scope.datasetId).toBe("ds-123-cool-app");
+			expect(scope.recallDatasetIds).toEqual(["ds-123-cool-app"]);
+			expect(scope.retainDatasetLabel).toBe("id:ds-123-cool-app");
+			expect(scope.recallDatasetLabels).toEqual(["id:ds-123-cool-app"]);
 			expect(scope.datasetName).toBeUndefined();
 			expect(scope.recallDatasets).toBeUndefined();
-			expect(scope.projectLabel).toBeUndefined();
+			expect(scope.projectLabel).toBe("cool-app");
 			expect(scope.projectNode).toBeUndefined();
-			expect(warnSpy).toHaveBeenCalledTimes(1);
-			expect(String(warnSpy.mock.calls[0]?.[0])).toContain("per-project");
-			expect(String(warnSpy.mock.calls[0]?.[0])).toContain("dataset IDs");
-			expect(warnSpy.mock.calls[0]?.[1]).toEqual({
-				scoping: "per-project",
-				datasetId: "ds-123",
-				projectLabel: "cool-app",
-			});
 		});
 	});
 
 	describe("per-project-tagged", () => {
-		it("retains a project node while recalling the shared dataset", () => {
+		it("retains and recalls with the project node while targeting the shared dataset", () => {
 			const scope = computeCogneeScope(
 				baseConfig({ scoping: "per-project-tagged", nodeSet: ["team:infra"] }),
 				"/repo/cool-app",
@@ -219,7 +211,7 @@ describe("computeCogneeScope", () => {
 			expect(scope.projectLabel).toBe("cool-app");
 			expect(scope.projectNode).toBe("project:cool-app");
 			expect(scope.retainNodeSet).toEqual(["team:infra", "project:cool-app"]);
-			expect(scope.recallNodeName).toBeUndefined();
+			expect(scope.recallNodeName).toEqual(["project:cool-app"]);
 			expect(scope.recallDatasets).toEqual(["omp"]);
 			expect(scope.recallDatasetIds).toBeUndefined();
 		});
@@ -233,9 +225,7 @@ describe("computeCogneeScope", () => {
 			expect(scope.retainNodeSet).toEqual(["team:infra", "project:cool-app"]);
 		});
 
-		it("uses dataset IDs with soft project scoping and no warning", () => {
-			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
-
+		it("uses dataset IDs with the project node recall filter", () => {
 			const scope = computeCogneeScope(
 				baseConfig({ scoping: "per-project-tagged", datasetId: " ds-123 " }),
 				"/repo/cool-app",
@@ -249,7 +239,7 @@ describe("computeCogneeScope", () => {
 			expect(scope.projectLabel).toBe("cool-app");
 			expect(scope.projectNode).toBe("project:cool-app");
 			expect(scope.retainNodeSet).toEqual(["project:cool-app"]);
-			expect(warnSpy).not.toHaveBeenCalled();
+			expect(scope.recallNodeName).toEqual(["project:cool-app"]);
 		});
 	});
 

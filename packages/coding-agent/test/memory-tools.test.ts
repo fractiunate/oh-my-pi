@@ -402,6 +402,52 @@ describe("MemoryToolOps seam", () => {
 		expect(text).toContain("- Ship narrow changes. (id: mem-2)");
 	});
 
+	it("throws Cognee recall search failure messages instead of returning no-results", async () => {
+		const ops = resolveMemoryToolOps(
+			fakeBackendSession("cognee", {
+				getCogneeSessionState: () => ({
+					sessionId: "cognee-session",
+					enqueueRetain: () => {},
+					search: async (query: string) => ({
+						backend: "off",
+						query,
+						count: 0,
+						items: [],
+						message: "Cognee recall failed: HTTP 503 Service Unavailable",
+					}),
+					save: async () => ({ backend: "off", stored: 1 }),
+				}),
+			}),
+		)!;
+
+		await expect(ops.recall("deployment notes")).rejects.toThrow(
+			"Cognee recall failed: HTTP 503 Service Unavailable",
+		);
+	});
+
+	it("throws Cognee reflect search failure messages instead of returning the empty fallback", async () => {
+		const ops = resolveMemoryToolOps(
+			fakeBackendSession("cognee", {
+				getCogneeSessionState: () => ({
+					sessionId: "cognee-session",
+					enqueueRetain: () => {},
+					search: async (query: string) => ({
+						backend: "off",
+						query,
+						count: 0,
+						items: [],
+						message: "Cognee recall failed: request timed out",
+					}),
+					save: async () => ({ backend: "off", stored: 1 }),
+				}),
+			}),
+		)!;
+
+		await expect(ops.reflect("what matters?", "repo context")).rejects.toThrow(
+			"Cognee recall failed: request timed out",
+		);
+	});
+
 	it("throws Cognee initialization errors at execution time", async () => {
 		const ops = resolveMemoryToolOps(fakeBackendSession("cognee"))!;
 		expect(ops.backend).toBe("cognee");

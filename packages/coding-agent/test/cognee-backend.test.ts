@@ -2,157 +2,62 @@
  * Cognee backend behavioural contract tests.
  *
  * These exercise `cogneeBackend` start / hooks / scope rebuild without a real
- * Cognee server or the not-yet-joined `./state` module. `./state` is mocked
- * with a structural fake `CogneeSessionState` plus side-channel helpers, and
- * `createCogneeClient` is mocked to inject fake clients. No `fetch` is
- * performed. Once `CogneeTestHarness` joins, the local fakes can be swapped
- * for its shared factories.
+ * Cognee server. The suite imports the real backend/state/client modules via
+ * relative source paths and fakes only the HTTP boundary with per-test
+ * `globalThis.fetch` spies, so it does not register module mocks that can leak
+ * into sibling Cognee test files in Bun's shared test process.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { AgentSessionEventListener } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import type { CogneeClient } from "@oh-my-pi/pi-coding-agent/cognee/client";
-import type { CogneeScope } from "@oh-my-pi/pi-coding-agent/cognee/scope";
-import type { CogneeConfig } from "@oh-my-pi/pi-coding-agent/cognee/config";
-
-// ─── Mock ./state (absent until CogneeSessionState joins) ───────────────────
-
-const stateBySession = new WeakMap<object, unknown>();
-
-interface FakeStateOptions {
-	sessionId: string;
-	client: CogneeClient;
-	config: CogneeConfig;
-	scope: CogneeScope;
-	session: object;
-	lastRetainedTurn?: number;
-	hasRecalledForFirstTurn?: boolean;
-	aliasOf?: unknown;
-}
-
-let constructHook: ((opts: FakeStateOptions) => void) | undefined;
-
-vi.mock("@oh-my-pi/pi-coding-agent/cognee/state", () => {
-	class FakeCogneeSessionState {
-		readonly sessionId: string;
-		readonly client: CogneeClient;
-		readonly config: CogneeConfig;
-		readonly scope: CogneeScope;
-		readonly session: object;
-		readonly lastRetainedTurn: number;
-		readonly hasRecalledForFirstTurn: boolean;
-		readonly aliasOf?: unknown;
-		lastRecallSnippet?: string;
-		lastRetainedAtIso?: string;
-		attached = false;
-		disposed = false;
-
-		constructor(opts: FakeStateOptions) {
-			this.sessionId = opts.sessionId;
-			this.client = opts.client;
-			this.config = opts.config;
-			this.scope = opts.scope;
-			this.session = opts.session;
-			this.lastRetainedTurn = opts.lastRetainedTurn ?? 0;
-			this.hasRecalledForFirstTurn = opts.hasRecalledForFirstTurn ?? false;
-			this.aliasOf = opts.aliasOf;
-			constructHook?.(opts);
-		}
-
-		setSessionId(): void {}
-		resetConversationTracking(): void {}
-		enqueueRetain(): void {}
-		async flushRetainQueue(): Promise<void> {}
-		async beforeAgentStartPrompt(): Promise<string | undefined> {
-			return undefined;
-		}
-		async recallForContext(): Promise<{ context: string | null; ok: boolean }> {
-			return { context: null, ok: false };
-		}
-		async recallForCompaction(): Promise<string | undefined> {
-			return undefined;
-		}
-		async forceRetainCurrentSession(): Promise<void> {}
-		async maybeRetainOnAgentEnd(): Promise<void> {}
-		attachSessionListeners(): void {
-			this.attached = true;
-		}
-		dispose(): void {
-			this.disposed = true;
-		}
-		async search(): Promise<{ count: number; items: unknown[] }> {
-			return { count: 0, items: [] };
-		}
-		async save(): Promise<{ stored: number }> {
-			return { stored: 1 };
-		}
-	}
-
-	return {
-		CogneeSessionState: FakeCogneeSessionState,
-		getCogneeSessionState: (session: object | undefined) =>
-			session ? stateBySession.get(session) : undefined,
-		setCogneeSessionState: (session: object, state: unknown) => {
-			const previous = stateBySession.get(session);
-			stateBySession.set(session, state);
-			return previous;
-		},
-	};
-});
-
-// ─── Mock createCogneeClient to inject fakes / simulate failure ─────────────
-
-let clientFactory: (opts: { baseUrl: string; apiKey?: string }) => CogneeClient = () =>
-	createFakeCogneeClient();
-
-vi.mock("@oh-my-pi/pi-coding-agent/cognee/client", () => ({
-	createCogneeClient: (opts: { baseUrl: string; apiKey?: string }) => clientFactory(opts),
-}));
-
-// Import after mocks are registered.
-import { cogneeBackend } from "@oh-my-pi/pi-coding-agent/cognee/backend";
+import { resetSettingsForTest, Settings } from "../src/config/settings";
+import type { AgentSessionEventListener } from "../src/session/agent-session";
+import type { CogneeClient } from "../src/cognee/client";
+import type { CogneeScope } from "../src/cognee/scope";
+import type { CogneeConfig } from "../src/cognee/config";
+import { cogneeBackend } from "../src/cognee/backend";
+import { getCogneeSessionState } from "../src/cognee/state";
 import {
-	getCogneeSessionState,
-	setCogneeSessionState,
-} from "@oh-my-pi/pi-coding-agent/cognee/state";
+	createFakeCogneeFetch,
+	type FakeCogneeFetchResponse,
+	type RecordedCogneeRequest,
+} from "./helpers/cognee";
 
 // ─── Fakes ──────────────────────────────────────────────────────────────────
 
-function createFakeCogneeClient(overrides: Partial<CogneeClient> = {}): CogneeClient {
-	const calls = {
-		remember: [] as unknown[],
-		recall: [] as unknown[],
-		improve: [] as unknown[],
-		forget: [] as unknown[],
-		listDatasets: 0,
-		getDatasetStatus: 0,
+function installFakeCogneeFetch(responses: FakeCogneeFetchResponse[]) {
+	const fake = createFakeCogneeFetch(responses);
+	vi.spyOn(globalThis, "fetch").mockImplementation(fake.fetch);
+	return fake;
+}
+
+function installThrowingFetchGetter(message: string): () => void {
+	const descriptor = Object.getOwnPropertyDescriptor(globalThis, "fetch");
+	Object.defineProperty(globalThis, "fetch", {
+		configurable: true,
+		get() {
+			throw new Error(message);
+		},
+	});
+	return () => {
+		if (descriptor) {
+			Object.defineProperty(globalThis, "fetch", descriptor);
+			return;
+		}
+		const host: typeof globalThis & { fetch?: typeof fetch } = globalThis;
+		delete host.fetch;
 	};
-	const base: CogneeClient = {
-		remember: async () => ({ ok: true, raw: {} }) as never,
-		rememberEntry: async () => ({ ok: true, raw: {} }) as never,
-		recall: async () => [] as never,
-		improve: async (req: never) => {
-			calls.improve.push(req);
-			return {} as never;
-		},
-		forget: async (req: never) => {
-			calls.forget.push(req);
-			return {} as never;
-		},
-		listDatasets: async () => {
-			calls.listDatasets++;
-			return [] as never;
-		},
-		getDatasetStatus: async () => {
-			calls.getDatasetStatus++;
-			return { status: "ok" } as never;
-		},
-		listDatasetData: async () => [] as never,
-		createDataset: async () => ({ id: "ds", name: "ds", status: "ok", raw: {} }) as never,
-	};
-	return { ...base, ...overrides, ...({ __calls: calls } as unknown) } as CogneeClient;
+}
+
+function jsonRequestBody(request: RecordedCogneeRequest): Record<string, unknown> {
+	if (request.body?.kind !== "json") {
+		throw new Error(`Expected JSON Cognee request body, got ${request.body?.kind ?? "none"}`);
+	}
+	const { value } = request.body;
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		throw new Error("Expected JSON Cognee request body to be an object");
+	}
+	return Object.fromEntries(Object.entries(value));
 }
 
 interface FakeSessionDeps {
@@ -163,9 +68,11 @@ interface FakeSessionDeps {
 
 function makeFakeSession(deps: FakeSessionDeps) {
 	const listeners = new Set<AgentSessionEventListener>();
+	const notices: Array<{ level: string; message: string; source?: string }> = [];
 	const session = {
 		sessionId: deps.sessionId,
 		settings: deps.settings ?? Settings.isolated(),
+		notices,
 		sessionManager: {
 			getCwd: () => deps.cwd ?? "/tmp",
 			getSessionId: () => deps.sessionId ?? "",
@@ -176,9 +83,15 @@ function makeFakeSession(deps: FakeSessionDeps) {
 			listeners.add(listener);
 			return () => listeners.delete(listener);
 		},
+		listenerCount() {
+			return listeners.size;
+		},
 		refreshBaseSystemPrompt: vi.fn().mockResolvedValue(undefined),
 		emit(event: Parameters<AgentSessionEventListener>[0]) {
 			for (const l of [...listeners]) l(event);
+		},
+		emitNotice(level: string, message: string, source?: string) {
+			notices.push({ level, message, source });
 		},
 	};
 	return session;
@@ -196,14 +109,10 @@ function makeConfiguredSettings(overrides: Record<string, unknown> = {}): Settin
 
 beforeEach(() => {
 	resetSettingsForTest();
-	constructHook = undefined;
-	clientFactory = () => createFakeCogneeClient();
 });
 
 afterEach(() => {
 	vi.restoreAllMocks();
-	constructHook = undefined;
-	clientFactory = () => createFakeCogneeClient();
 });
 
 // ─── start ──────────────────────────────────────────────────────────────────
@@ -212,8 +121,6 @@ describe("cogneeBackend.start", () => {
 	it("installs primary state with client, config, and scope for a configured top-level session", async () => {
 		const settings = makeConfiguredSettings();
 		const session = makeFakeSession({ sessionId: "s1" });
-		const fakeClient = createFakeCogneeClient();
-		clientFactory = () => fakeClient;
 
 		await cogneeBackend.start({
 			session: session as never,
@@ -223,35 +130,34 @@ describe("cogneeBackend.start", () => {
 			taskDepth: 0,
 		});
 
-		const state = getCogneeSessionState(session) as {
-			client: CogneeClient;
-			config: CogneeConfig;
-			scope: CogneeScope;
-			attached: boolean;
-		} | undefined;
+		const state = getCogneeSessionState(session) as
+			| { client: CogneeClient; config: CogneeConfig; scope: CogneeScope }
+			| undefined;
 		expect(state).toBeDefined();
-		expect(state?.client).toBe(fakeClient);
+		expect(state?.client).toBeDefined();
 		expect(state?.config.apiUrl).toBe("http://localhost:8000");
 		expect(state?.scope).toBeDefined();
-		expect(state?.attached).toBe(true);
+		expect(session.listenerCount()).toBe(1);
 	});
 
 	it("is non-throwing if client construction fails and leaves backend inactive", async () => {
 		const settings = makeConfiguredSettings();
 		const session = makeFakeSession({ sessionId: "s2" });
-		clientFactory = () => {
-			throw new Error("client construction failed");
-		};
+		const restoreFetch = installThrowingFetchGetter("client construction failed");
 
-		await expect(
-			cogneeBackend.start({
-				session: session as never,
-				settings,
-				modelRegistry: {} as never,
-				agentDir: "/tmp",
-				taskDepth: 0,
-			}),
-		).resolves.toBeUndefined();
+		try {
+			await expect(
+				cogneeBackend.start({
+					session: session as never,
+					settings,
+					modelRegistry: {} as never,
+					agentDir: "/tmp",
+					taskDepth: 0,
+				}),
+			).resolves.toBeUndefined();
+		} finally {
+			restoreFetch();
+		}
 
 		expect(getCogneeSessionState(session)).toBeUndefined();
 		const status = await cogneeBackend.status!({ agentDir: "/tmp", cwd: "/tmp", session: session as never });
@@ -286,8 +192,6 @@ describe("cogneeBackend.start", () => {
 	it("installs an alias for taskDepth > 0 with parentCogneeSessionState, sets hasRecalledForFirstTurn, and does not attach listeners", async () => {
 		const settings = makeConfiguredSettings();
 		const parentSession = makeFakeSession({ sessionId: "parent" });
-		const fakeClient = createFakeCogneeClient();
-		clientFactory = () => fakeClient;
 
 		await cogneeBackend.start({
 			session: parentSession as never,
@@ -309,17 +213,19 @@ describe("cogneeBackend.start", () => {
 			parentCogneeSessionState: parentState as never,
 		});
 
-		const subState = getCogneeSessionState(subSession) as {
-			aliasOf: unknown;
-			client: CogneeClient;
-			hasRecalledForFirstTurn: boolean;
-			attached: boolean;
-		} | undefined;
+		const subState = getCogneeSessionState(subSession) as
+			| {
+					aliasOf: unknown;
+					client: CogneeClient;
+					hasRecalledForFirstTurn: boolean;
+			  }
+			| undefined;
 		expect(subState).toBeDefined();
 		expect(subState?.aliasOf).toBe(parentState);
 		expect(subState?.client).toBe(parentState?.client);
 		expect(subState?.hasRecalledForFirstTurn).toBe(true);
-		expect(subState?.attached).toBe(false);
+		expect(parentSession.listenerCount()).toBe(1);
+		expect(subSession.listenerCount()).toBe(0);
 	});
 
 	it("returns silently for subagent runs when no parentCogneeSessionState is provided", async () => {
@@ -578,8 +484,7 @@ describe("cogneeBackend.clear", () => {
 	it("flushes, clears/disposes state, unsubscribes, logs local-only warning, never calls forget", async () => {
 		const settings = makeConfiguredSettings();
 		const session = makeFakeSession({ sessionId: "s-clear", settings });
-		const fakeClient = createFakeCogneeClient();
-		clientFactory = () => fakeClient;
+
 		await cogneeBackend.start({
 			session: session as never,
 			settings,
@@ -589,8 +494,7 @@ describe("cogneeBackend.clear", () => {
 		});
 		const state = getCogneeSessionState(session) as {
 			flushRetainQueue: () => Promise<void>;
-			dispose: () => void;
-			disposed: boolean;
+			dispose: () => void | Promise<void>;
 		};
 		const flushSpy = vi.spyOn(state, "flushRetainQueue");
 		const { logger } = await import("@oh-my-pi/pi-utils");
@@ -600,7 +504,7 @@ describe("cogneeBackend.clear", () => {
 
 		expect(flushSpy).toHaveBeenCalled();
 		expect(getCogneeSessionState(session)).toBeUndefined();
-		expect(state.disposed).toBe(true);
+		expect(session.listenerCount()).toBe(0);
 		const warned = warnSpy.mock.calls.some(c =>
 			String(c[0]).includes("only local recall cache/session state was cleared"),
 		);
@@ -614,8 +518,7 @@ describe("cogneeBackend.enqueue", () => {
 	it("on primary state flushes, force-retains, and calls client.improve with routing fields", async () => {
 		const settings = makeConfiguredSettings({ "cognee.sessionMemoryEnabled": true });
 		const session = makeFakeSession({ sessionId: "s-enq", settings });
-		const fakeClient = createFakeCogneeClient();
-		clientFactory = () => fakeClient;
+		const fakeFetch = installFakeCogneeFetch([{ body: { ok: true } }]);
 		await cogneeBackend.start({
 			session: session as never,
 			settings,
@@ -633,32 +536,28 @@ describe("cogneeBackend.enqueue", () => {
 		};
 		const flushSpy = vi.spyOn(state, "flushRetainQueue");
 		const forceSpy = vi.spyOn(state, "forceRetainCurrentSession");
-		const improveSpy = vi.spyOn(fakeClient, "improve");
 
 		await cogneeBackend.enqueue("/tmp", "/tmp", session as never);
 
 		expect(flushSpy).toHaveBeenCalled();
 		expect(forceSpy).toHaveBeenCalled();
-		expect(improveSpy).toHaveBeenCalledTimes(1);
-		const arg = improveSpy.mock.calls[0]?.[0] as {
-			datasetName?: string;
-			datasetId?: string;
-			sessionIds?: string[];
-			nodeName?: string[];
-			runInBackground?: boolean;
-			buildGlobalContextIndex?: boolean;
-		};
-		expect(arg.datasetName).toBe(state.scope.datasetName);
-		expect(arg.datasetId).toBe(state.scope.datasetId);
-		expect(arg.sessionIds).toEqual([state.sessionId]);
-		expect(arg.runInBackground).toBe(state.config.runInBackground);
-		expect(arg.buildGlobalContextIndex).toBe(state.config.buildGlobalContextIndex);
+		expect(fakeFetch.requests).toHaveLength(1);
+		const [request] = fakeFetch.requests;
+		if (!request) throw new Error("Expected Cognee improve request");
+		expect(request.method).toBe("POST");
+		expect(request.path).toBe("/api/v1/improve");
+		const body = jsonRequestBody(request);
+		expect(body.datasetName).toBe(state.scope.datasetName);
+		expect(body.datasetId).toBe(state.scope.datasetId);
+		expect(body.sessionIds).toEqual([state.sessionId]);
+		expect(body.runInBackground).toBe(state.config.runInBackground);
+		expect(body.buildGlobalContextIndex).toBe(state.config.buildGlobalContextIndex);
 	});
 
 	it("on alias state returns without retain/improve", async () => {
 		const settings = makeConfiguredSettings();
 		const parentSession = makeFakeSession({ sessionId: "parent-enq" });
-		clientFactory = () => createFakeCogneeClient();
+
 		await cogneeBackend.start({
 			session: parentSession as never,
 			settings,
@@ -704,8 +603,7 @@ describe("cogneeBackend.enqueue", () => {
 	it("catches/warns improve failure after successful retain", async () => {
 		const settings = makeConfiguredSettings();
 		const session = makeFakeSession({ sessionId: "s-enq-fail", settings });
-		const fakeClient = createFakeCogneeClient();
-		clientFactory = () => fakeClient;
+		installFakeCogneeFetch([{ status: 500, body: { detail: "improve down" } }]);
 		await cogneeBackend.start({
 			session: session as never,
 			settings,
@@ -718,7 +616,7 @@ describe("cogneeBackend.enqueue", () => {
 			forceRetainCurrentSession: () => Promise<void>;
 		};
 		const forceSpy = vi.spyOn(state, "forceRetainCurrentSession");
-		vi.spyOn(fakeClient, "improve").mockRejectedValue(new Error("improve down"));
+
 		const { logger } = await import("@oh-my-pi/pi-utils");
 		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
 
@@ -735,18 +633,10 @@ describe("cogneeBackend.stats", () => {
 	it("renders markdown, omits API key, catches dataset status/list failures, does not create datasets", async () => {
 		const settings = makeConfiguredSettings({ "cognee.apiKey": "secret" });
 		const session = makeFakeSession({ sessionId: "s-stats", settings });
-		const fakeClient = createFakeCogneeClient({
-			getDatasetStatus: async () => {
-				throw new Error("status down");
-			},
-			listDatasets: async () => {
-				throw new Error("list down");
-			},
-			createDataset: async () => {
-				throw new Error("must not be called");
-			},
-		});
-		clientFactory = () => fakeClient;
+		const fakeFetch = installFakeCogneeFetch([
+			{ status: 500, body: { detail: "status down" } },
+			{ status: 500, body: { detail: "list down" } },
+		]);
 		await cogneeBackend.start({
 			session: session as never,
 			settings,
@@ -761,6 +651,7 @@ describe("cogneeBackend.stats", () => {
 		expect(out).not.toContain("secret");
 		expect(out).toContain("status down");
 		expect(out).toContain("list down");
+		expect(fakeFetch.requests.some(req => req.method === "POST" && req.path === "/api/v1/datasets")).toBe(false);
 	});
 
 	it("renders Configured: no without a client when unconfigured", async () => {
@@ -777,15 +668,10 @@ describe("cogneeBackend.diagnose", () => {
 	it("redacts API key and renders dataset status/list failures as markdown instead of throwing", async () => {
 		const settings = makeConfiguredSettings({ "cognee.apiKey": "topsecret" });
 		const session = makeFakeSession({ sessionId: "s-diag", settings });
-		const fakeClient = createFakeCogneeClient({
-			getDatasetStatus: async () => {
-				throw new Error("diag status down");
-			},
-			listDatasets: async () => {
-				throw new Error("diag list down");
-			},
-		});
-		clientFactory = () => fakeClient;
+		installFakeCogneeFetch([
+			{ status: 500, body: { detail: "diag status down" } },
+			{ status: 500, body: { detail: "diag list down" } },
+		]);
 		await cogneeBackend.start({
 			session: session as never,
 			settings,

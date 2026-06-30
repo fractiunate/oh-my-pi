@@ -230,6 +230,8 @@ function createCogneeOps(session: ToolSession): MemoryToolOps {
 			const state = getCogneeState(session);
 			const result = await state.search(query, options);
 			const items = result.items ?? [];
+			const failureMessage = cogneeSearchFailureMessage(result, items.length);
+			if (failureMessage) throw new Error(failureMessage);
 			if (items.length === 0 || result.count === 0) return noRelevantMemories();
 			return foundMemories(items.length, formatGenericSearchItems(items));
 		},
@@ -238,6 +240,8 @@ function createCogneeOps(session: ToolSession): MemoryToolOps {
 			const searchQuery = context?.trim() ? `${query.trim()}\n\nAdditional context:\n${context.trim()}` : query;
 			const result = await state.search(searchQuery, { signal });
 			const items = result.items ?? [];
+			const failureMessage = cogneeSearchFailureMessage(result, items.length);
+			if (failureMessage) throw new Error(failureMessage);
 			if (items.length === 0 || result.count === 0) {
 				return { content: [{ type: "text", text: "No relevant information found to reflect on." }], details: {} };
 			}
@@ -256,6 +260,12 @@ function createCogneeOps(session: ToolSession): MemoryToolOps {
 			throw new Error(result.message || "Cognee did not store the lesson.");
 		},
 	};
+}
+
+function cogneeSearchFailureMessage(result: MemoryBackendSearchResult, itemCount: number): string | null {
+	const message = result.message?.trim();
+	if (!message) return null;
+	return itemCount === 0 || result.count === 0 ? message : null;
 }
 
 function countResult(nounBase: "memory", count: number, mode: "queued" | "stored"): AgentToolResult {

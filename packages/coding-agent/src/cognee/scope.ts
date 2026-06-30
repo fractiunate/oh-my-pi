@@ -1,5 +1,4 @@
 import * as path from "node:path";
-import { logger } from "@oh-my-pi/pi-utils";
 import * as git from "../utils/git";
 import type { CogneeConfig } from "./config";
 
@@ -33,7 +32,7 @@ export interface CogneeScope {
 	/** Node tags sent to remember. Includes configured static nodes plus project node when applicable. */
 	retainNodeSet?: string[];
 
-	/** Optional node filter for strict project recall. Undefined in v1 per-project-tagged to preserve global+project recall. */
+	/** Optional node filters sent to recall for strict project isolation. */
 	recallNodeName?: string[];
 
 	/** Project label derived from primary git checkout root or cwd basename. */
@@ -138,13 +137,11 @@ export function computeCogneeScope(config: CogneeConfig, cwd: string, sessionId?
 		case "per-project": {
 			if (id) {
 				const projectLabel = deriveProjectLabel(cwd);
-				logger.warn(
-					"Cognee per-project scoping cannot derive per-project dataset IDs; using configured dataset ID as a global target.",
-					{ scoping: config.scoping, datasetId: id, projectLabel },
-				);
+				const projectDatasetId = `${id}-${projectLabel}`;
 				return {
-					label: `global:id:${id}`,
-					...idTarget(id),
+					label: `project:${projectLabel}`,
+					...idTarget(projectDatasetId),
+					projectLabel,
 					...(staticNodeSet ? { retainNodeSet: staticNodeSet } : {}),
 					...sessionField,
 				};
@@ -172,8 +169,7 @@ export function computeCogneeScope(config: CogneeConfig, cwd: string, sessionId?
 				projectLabel,
 				projectNode,
 				...(retainNodeSet ? { retainNodeSet } : {}),
-				// Soft scoping: recall intentionally searches the shared dataset without a node filter so
-				// untagged/global memories remain visible; users needing hard isolation must use per-project.
+				recallNodeName: [projectNode],
 				...sessionField,
 			};
 		}
