@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { CogneeError, createCogneeClient } from "@oh-my-pi/pi-coding-agent/cognee/client";
+import { CogneeError, createCogneeClient } from "../src/cognee/client";
 import { createFakeCogneeFetch, type RecordedCogneeFormValue, type RecordedCogneeRequest } from "./helpers/cognee";
 
 function rejectingFetch(error: Error): typeof fetch {

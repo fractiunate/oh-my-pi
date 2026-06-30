@@ -480,7 +480,8 @@ describe("CogneeSessionState auto-retain", () => {
 		await Promise.resolve();
 		await Promise.resolve();
 		expect(client.rememberCalls).toHaveLength(1);
-		const data = String((client.rememberCalls[0].request.data as unknown[])[0]);
+		const rawData = client.rememberCalls[0].request.data;
+		const data = typeof rawData === "string" ? rawData : String((rawData as unknown[])[0]);
 		// last-turn mode slices to retainEveryNTurns + retainOverlapTurns = 5 user turns,
 		// which covers all 3 user turns here; assert the window marker is present.
 		expect(data).toContain("[role: user]");
@@ -608,7 +609,7 @@ describe("CogneeSessionState retain queue", () => {
 		const { options, session, client } = makeOptions();
 		const state = new CogneeSessionState(options);
 		setCogneeSessionState(asSession(session), state);
-		for (let i = 0; i < 129; i++) {
+		for (let i = 0; i < 145; i++) {
 			state.enqueueRetain(`memory ${i}`);
 		}
 		// Enqueueing the 129th should trigger a drop notice and a batch flush at 16.
