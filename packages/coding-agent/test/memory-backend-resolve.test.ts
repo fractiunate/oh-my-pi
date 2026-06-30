@@ -18,6 +18,11 @@ describe("resolveMemoryBackend", () => {
 		expect((await resolveMemoryBackend(b)).id).toBe("hindsight");
 	});
 
+	it("returns the cognee backend when memory.backend is cognee", async () => {
+		const settings = Settings.isolated({ "memory.backend": "cognee" });
+		expect((await resolveMemoryBackend(settings)).id).toBe("cognee");
+	});
+
 	it("exposes inactive status when no session is available", async () => {
 		const memory = createMemoryRuntimeContext({ agentDir: "/tmp/agent", cwd: "/tmp/project" });
 
