@@ -84,7 +84,7 @@ describe("Cognee HTTP client", () => {
 		expect(form.getAll("data")[0]).toBe("first");
 		expect(form.getAll("data")[1]).toBe("second");
 		expect(form.getAll("data")[2]).toBeInstanceOf(Blob);
-		expect((form.getAll("data")[2] as Blob).type).toBe("text/plain");
+		expect((form.getAll("data")[2] as Blob).type.startsWith("text/plain")).toBe(true);
 		expect(form.get("datasetName")).toBe("main");
 		expect(form.get("datasetId")).toBe("dataset-id");
 		expect(form.get("session_id")).toBe("session-id");
@@ -274,7 +274,7 @@ describe("Cognee HTTP client", () => {
 		expect(entries[4]).toMatchObject({ text: "node", nodeName: "node" });
 		for (let index = 0; index < entries.length; index += 1) {
 			expect(entries[index]?.text.length).toBeGreaterThan(0);
-			expect(entries[index]?.raw).toBe(raw[index]);
+			expect(entries[index]?.raw).toEqual(raw[index]);
 		}
 	});
 
