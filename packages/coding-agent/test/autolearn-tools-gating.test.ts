@@ -29,6 +29,25 @@ function makeSession(
 	};
 }
 
+function makeCogneeSession(autolearnEnabled: boolean, extra: Record<string, unknown> = {}): ToolSession {
+	const settings = {
+		get: (key: string) => {
+			if (key === "autolearn.enabled") return autolearnEnabled;
+			if (key === "memory.backend") return "cognee";
+			return undefined;
+		},
+	};
+	return {
+		cwd: "/tmp/test",
+		hasUI: false,
+		skipPythonPreflight: true,
+		getSessionFile: () => null,
+		getSessionSpawns: () => "*",
+		settings,
+		...extra,
+	} as unknown as ToolSession;
+}
+
 describe("autolearn tool gating", () => {
 	it("offers neither tool by default (autolearn disabled)", async () => {
 		const names = (await createTools(makeSession())).map(t => t.name);
@@ -102,6 +121,11 @@ describe("autolearn tool gating", () => {
 			await createTools(makeSession({ "autolearn.enabled": true, "memory.backend": "local" }), ["read"])
 		).map(t => t.name);
 		expect(restricted).toContain("learn");
+	});
+
+	it("direct LearnTool factory accepts Cognee only when autolearn is enabled", () => {
+		expect(LearnTool.createIf(makeCogneeSession(true))).toBeInstanceOf(LearnTool);
+		expect(LearnTool.createIf(makeCogneeSession(false))).toBeNull();
 	});
 });
 
@@ -307,5 +331,82 @@ describe("learn execute", () => {
 		).rejects.toThrow(/did not store/i);
 		// A failed lesson must not leave a minted skill behind.
 		expect(await Bun.file(path.join(getManagedSkillsDir(), "should-not-exist", "SKILL.md")).exists()).toBe(false);
+	});
+
+	it("stores a Cognee lesson through structural state", async () => {
+		const saved: unknown[] = [];
+		const session = makeCogneeSession(true, {
+			getCogneeSessionState: () => ({
+				sessionId: "cognee-session",
+				enqueueRetain: () => {},
+				search: async () => ({ backend: "off", query: "", count: 0, items: [] }),
+				save: async (input: unknown) => {
+					saved.push(input);
+					return { backend: "cognee", stored: 1 };
+				},
+			}),
+		});
+
+		const result = await new LearnTool(session).execute("cognee-1", {
+			memory: "Prefer focused changes.",
+			context: "review",
+		});
+
+		expect(saved).toEqual([
+			{ content: "Prefer focused changes.", context: "review", source: "coding-agent-learn", importance: 0.8 },
+		]);
+		expect(result.content[0]).toEqual({ type: "text", text: "Lesson stored." });
+	});
+
+	it("reports queued Cognee lessons", async () => {
+		const session = makeCogneeSession(true, {
+			getCogneeSessionState: () => ({
+				sessionId: "cognee-session",
+				enqueueRetain: () => {},
+				search: async () => ({ backend: "off", query: "", count: 0, items: [] }),
+				save: async () => ({ backend: "cognee", stored: 0, queued: true }),
+			}),
+		});
+
+		const result = await new LearnTool(session).execute("cognee-2", { memory: "Queue when remote store defers." });
+
+		expect(result.content[0]).toEqual({ type: "text", text: "Lesson queued for retention." });
+	});
+
+	it("fails a Cognee lesson before writing a managed skill when save reports no storage", async () => {
+		const session = makeCogneeSession(true, {
+			getCogneeSessionState: () => ({
+				sessionId: "cognee-session",
+				enqueueRetain: () => {},
+				search: async () => ({ backend: "off", query: "", count: 0, items: [] }),
+				save: async () => ({ backend: "cognee", stored: 0, message: "Cognee unavailable" }),
+			}),
+		});
+
+		await expect(
+			new LearnTool(session).execute("cognee-3", {
+				memory: "lesson",
+				skill: { action: "create", name: "should-not-exist", description: "d", body: "b" },
+			}),
+		).rejects.toThrow(/Cognee unavailable/);
+		expect(await Bun.file(path.join(getManagedSkillsDir(), "should-not-exist", "SKILL.md")).exists()).toBe(false);
+	});
+
+	it("reports Cognee skill failures with the Cognee memory message", async () => {
+		const session = makeCogneeSession(true, {
+			getCogneeSessionState: () => ({
+				sessionId: "cognee-session",
+				enqueueRetain: () => {},
+				search: async () => ({ backend: "off", query: "", count: 0, items: [] }),
+				save: async () => ({ backend: "cognee", stored: 0, queued: true }),
+			}),
+		});
+
+		await expect(
+			new LearnTool(session).execute("cognee-4", {
+				memory: "queued lesson",
+				skill: { action: "create", name: "../evil", description: "d", body: "b" },
+			}),
+		).rejects.toThrow(/Lesson queued for retention, but the managed skill could not be written/);
 	});
 });
