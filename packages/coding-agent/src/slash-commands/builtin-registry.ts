@@ -1539,13 +1539,21 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				case "reset": {
 					await backend.clear(runtime.settings.getAgentDir(), runtime.cwd, runtime.session);
 					await runtime.session.refreshBaseSystemPrompt();
-					await runtime.output("Memory cleared.");
+					await runtime.output(
+						(backend.id as string) === "cognee"
+							? "Cognee local session memory cleared; upstream Cognee datasets were not deleted."
+							: "Memory cleared.",
+					);
 					return commandConsumed();
 				}
 				case "enqueue":
 				case "rebuild": {
 					await backend.enqueue(runtime.settings.getAgentDir(), runtime.cwd, runtime.session);
-					await runtime.output("Memory consolidation enqueued.");
+					await runtime.output(
+						(backend.id as string) === "cognee"
+							? "Cognee memory maintenance enqueued."
+							: "Memory consolidation enqueued.",
+					);
 					return commandConsumed();
 				}
 				case "stats":
