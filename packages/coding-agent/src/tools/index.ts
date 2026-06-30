@@ -53,6 +53,7 @@ import { JobTool } from "./job";
 import { LearnTool } from "./learn";
 import { ManageSkillTool } from "./manage-skill";
 import { MemoryEditTool } from "./memory-edit";
+import { isMemoryToolsBackend } from "./memory-ops";
 import { MemoryRecallTool } from "./memory-recall";
 import { MemoryReflectTool } from "./memory-reflect";
 import { MemoryRetainTool } from "./memory-retain";
@@ -499,6 +500,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	const allowRuby = backends.ruby;
 	const allowJulia = backends.julia;
 	const skipEvalPreflight = session.skipPythonPreflight === true;
+	const memoryBackend = session.settings.get("memory.backend");
 	// Eval tool is enabled if ANY backend is reachable. JS needs no preflight, so
 	// we only probe Python/Ruby/Julia when JS is disabled — otherwise allowEval is
 	// already true and per-backend availability is checked at first invocation.
@@ -564,7 +566,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		) {
 			requestedTools.push("ast_edit");
 		}
-		if (["hindsight", "mnemopi"].includes(session.settings.get("memory.backend") ?? "")) {
+		if (isMemoryToolsBackend(memoryBackend)) {
 			for (const name of ["recall", "retain", "reflect"]) {
 				if (!requestedTools.includes(name)) requestedTools.push(name);
 			}
@@ -578,7 +580,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (session.settings.get("autolearn.enabled") && (session.taskDepth ?? 0) === 0) {
 			if (!requestedTools.includes("manage_skill")) requestedTools.push("manage_skill");
 			if (
-				["hindsight", "mnemopi", "local"].includes(session.settings.get("memory.backend") ?? "") &&
+				(isMemoryToolsBackend(memoryBackend) || memoryBackend === "local") &&
 				!requestedTools.includes("learn")
 			) {
 				requestedTools.push("learn");
@@ -614,14 +616,14 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "checkpoint" || name === "rewind") return session.settings.get("checkpoint.enabled");
 		if (name === "irc") return isIrcEnabled(session.settings, session.taskDepth ?? 0);
 		if (name === "retain" || name === "recall" || name === "reflect") {
-			return ["hindsight", "mnemopi"].includes(session.settings.get("memory.backend") ?? "");
+			return isMemoryToolsBackend(memoryBackend);
 		}
 		if (name === "manage_skill") return session.settings.get("autolearn.enabled") && (session.taskDepth ?? 0) === 0;
 		if (name === "learn") {
 			return (
 				session.settings.get("autolearn.enabled") &&
 				(session.taskDepth ?? 0) === 0 &&
-				["hindsight", "mnemopi", "local"].includes(session.settings.get("memory.backend") ?? "")
+				(isMemoryToolsBackend(memoryBackend) || memoryBackend === "local")
 			);
 		}
 		if (name === "task") {
