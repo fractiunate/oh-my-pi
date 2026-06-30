@@ -1,57 +1,30 @@
 import { describe, expect, it } from "bun:test";
 import { CogneeError, createCogneeClient } from "@oh-my-pi/pi-coding-agent/cognee/client";
+import { createFakeCogneeFetch, type RecordedCogneeFormValue, type RecordedCogneeRequest } from "./helpers/cognee";
 
-type CapturedCall = {
-	url: string;
-	method?: string;
-	headers: Headers;
-	body?: BodyInit | null;
-	signal?: AbortSignal | null;
-};
-
-type FetchOutcome = Response | Error;
-
-function jsonResponse(value: unknown, status = 200): Response {
-	return new Response(JSON.stringify(value), {
-		status,
-		headers: { "Content-Type": "application/json" },
-	});
-}
-
-function fakeFetch(...outcomes: FetchOutcome[]): { fetch: typeof fetch; calls: CapturedCall[] } {
-	const calls: CapturedCall[] = [];
-	const queue = [...outcomes];
-	const fetchImpl = Object.assign(
-		async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-			calls.push({
-				url: String(input),
-				method: init?.method,
-				headers: new Headers(init?.headers),
-				body: init?.body ?? null,
-				signal: init?.signal ?? null,
-			});
-			const next = queue.shift() ?? jsonResponse({});
-			if (next instanceof Error) throw next;
-			return next;
+function rejectingFetch(error: Error): typeof fetch {
+	return Object.assign(
+		async (_input: string | URL | Request, _init?: RequestInit) => {
+			throw error;
 		},
 		{ preconnect: globalThis.fetch.preconnect },
 	) as typeof fetch;
-	return { fetch: fetchImpl, calls };
 }
 
-function jsonBody(call: CapturedCall): Record<string, unknown> {
-	return JSON.parse(String(call.body)) as Record<string, unknown>;
+function jsonBody(call: RecordedCogneeRequest): Record<string, unknown> {
+	expect(call.body?.kind).toBe("json");
+	return call.body.value as Record<string, unknown>;
 }
 
-function formBody(call: CapturedCall): FormData {
-	expect(call.body).toBeInstanceOf(FormData);
-	return call.body as FormData;
+function formBody(call: RecordedCogneeRequest): Record<string, RecordedCogneeFormValue[]> {
+	expect(call.body?.kind).toBe("form");
+	return call.body.fields;
 }
 
 describe("Cognee HTTP client", () => {
 	it("remember posts FormData with exact fields, base URL trimming, and AbortSignal forwarding", async () => {
 		const abort = new AbortController();
-		const { fetch, calls } = fakeFetch(jsonResponse({ status: "ok" }));
+		const { fetch, requests } = createFakeCogneeFetch([{ body: { status: "ok" } }]);
 		const client = createCogneeClient({ baseUrl: "http://cognee.local/", fetch });
 
 		await client.remember(
@@ -72,54 +45,56 @@ describe("Cognee HTTP client", () => {
 			abort.signal,
 		);
 
-		const call = calls[0];
-		expect(call?.url).toBe("http://cognee.local/api/v1/remember");
+		const call = requests[0];
+		expect(call?.path).toBe("/api/v1/remember");
 		expect(call?.method).toBe("POST");
 		expect(call?.signal).toBe(abort.signal);
-		expect(call?.headers.get("Accept")).toBe("application/json");
-		expect(call?.headers.get("User-Agent")).toBe("oh-my-pi-coding-agent");
-		expect(call?.headers.has("Content-Type")).toBe(false);
-		const form = formBody(call);
-		expect(form.getAll("data").length).toBe(3);
-		expect(form.getAll("data")[0]).toBe("first");
-		expect(form.getAll("data")[1]).toBe("second");
-		expect(form.getAll("data")[2]).toBeInstanceOf(Blob);
-		expect((form.getAll("data")[2] as Blob).type.startsWith("text/plain")).toBe(true);
-		expect(form.get("datasetName")).toBe("main");
-		expect(form.get("datasetId")).toBe("dataset-id");
-		expect(form.get("session_id")).toBe("session-id");
-		expect(form.getAll("node_set")).toEqual(["project:a", "user:b"]);
-		expect(form.get("run_in_background")).toBe("false");
-		expect(form.get("custom_prompt")).toBe("custom");
-		expect(form.get("chunk_size")).toBe("0");
-		expect(form.get("chunks_per_batch")).toBe("12");
-		expect(form.getAll("ontology_key")).toEqual(["key-a", "key-b"]);
-		expect(form.get("graph_model")).toBe("graph-model");
-		expect(form.get("content_type")).toBe("text/plain");
+		expect(call?.headers["accept"]).toBe("application/json");
+		expect(call?.headers["user-agent"]).toBe("oh-my-pi-coding-agent");
+		expect(call?.headers["content-type"]).toBeUndefined();
+		const form = formBody(call as RecordedCogneeRequest);
+		expect(form.data.length).toBe(3);
+		expect(form.data[0]).toBe("first");
+		expect(form.data[1]).toBe("second");
+		const dataBlob = form.data[2] as { kind: string; type: string; size: number };
+		expect(dataBlob.kind).toBe("blob");
+		expect(dataBlob.type.startsWith("text/plain")).toBe(true);
+		expect(dataBlob.size).toBe(2);
+		expect(form.datasetName[0]).toBe("main");
+		expect(form.datasetId[0]).toBe("dataset-id");
+		expect(form.session_id[0]).toBe("session-id");
+		expect(form.node_set).toEqual(["project:a", "user:b"]);
+		expect(form.run_in_background[0]).toBe("false");
+		expect(form.custom_prompt[0]).toBe("custom");
+		expect(form.chunk_size[0]).toBe("0");
+		expect(form.chunks_per_batch[0]).toBe("12");
+		expect(form.ontology_key).toEqual(["key-a", "key-b"]);
+		expect(form.graph_model[0]).toBe("graph-model");
+		expect(form.content_type[0]).toBe("text/plain");
 	});
 
 	it("sends X-Api-Key when apiKey exists", async () => {
-		const { fetch, calls } = fakeFetch();
+		const { fetch, requests } = createFakeCogneeFetch([{ body: {} }]);
 		const client = createCogneeClient({ baseUrl: "http://cognee.local", apiKey: "secret", fetch });
 
 		await client.remember({ data: "memory" });
 
-		expect(calls[0]?.headers.get("X-Api-Key")).toBe("secret");
-		expect(calls[0]?.headers.has("Authorization")).toBe(false);
+		expect(requests[0]?.headers["x-api-key"]).toBe("secret");
+		expect(requests[0]?.headers["authorization"]).toBeUndefined();
 	});
 
 	it("sends Authorization only when apiKey is absent", async () => {
-		const { fetch, calls } = fakeFetch();
+		const { fetch, requests } = createFakeCogneeFetch([{ body: {} }]);
 		const client = createCogneeClient({ baseUrl: "http://cognee.local", bearerToken: "bearer", fetch });
 
 		await client.remember({ data: "memory" });
 
-		expect(calls[0]?.headers.get("Authorization")).toBe("Bearer bearer");
-		expect(calls[0]?.headers.has("X-Api-Key")).toBe(false);
+		expect(requests[0]?.headers["authorization"]).toBe("Bearer bearer");
+		expect(requests[0]?.headers["x-api-key"]).toBeUndefined();
 	});
 
 	it("prefers X-Api-Key over bearer auth when both are configured", async () => {
-		const { fetch, calls } = fakeFetch();
+		const { fetch, requests } = createFakeCogneeFetch([{ body: {} }]);
 		const client = createCogneeClient({
 			baseUrl: "http://cognee.local",
 			apiKey: "secret",
@@ -129,8 +104,8 @@ describe("Cognee HTTP client", () => {
 
 		await client.remember({ data: "memory" });
 
-		expect(calls[0]?.headers.get("X-Api-Key")).toBe("secret");
-		expect(calls[0]?.headers.has("Authorization")).toBe(false);
+		expect(requests[0]?.headers["x-api-key"]).toBe("secret");
+		expect(requests[0]?.headers["authorization"]).toBeUndefined();
 	});
 
 	it("remember normalizes snake_case fields and preserves raw", async () => {
@@ -148,7 +123,7 @@ describe("Cognee HTTP client", () => {
 			entry_id: "entry-id",
 			message: "fallback error",
 		};
-		const { fetch } = fakeFetch(jsonResponse(raw));
+		const { fetch } = createFakeCogneeFetch([{ body: raw }]);
 		const client = createCogneeClient({ baseUrl: "http://cognee.local", fetch });
 
 		const result = await client.remember({ data: "memory" });
@@ -172,7 +147,7 @@ describe("Cognee HTTP client", () => {
 
 	it("rememberEntry posts JSON, prunes top-level undefined, preserves metadata, forwards signal, and normalizes", async () => {
 		const abort = new AbortController();
-		const { fetch, calls } = fakeFetch(jsonResponse({ status: "ok", entry_id: "entry" }));
+		const { fetch, requests } = createFakeCogneeFetch([{ body: { status: "ok", entry_id: "entry" } }]);
 		const client = createCogneeClient({ baseUrl: "http://cognee.local", fetch });
 
 		const result = await client.rememberEntry(
@@ -191,10 +166,10 @@ describe("Cognee HTTP client", () => {
 			abort.signal,
 		);
 
-		expect(calls[0]?.url).toBe("http://cognee.local/api/v1/remember/entry");
-		expect(calls[0]?.headers.get("Content-Type")).toBe("application/json");
-		expect(calls[0]?.signal).toBe(abort.signal);
-		expect(jsonBody(calls[0])).toEqual({
+		expect(requests[0]?.path).toBe("/api/v1/remember/entry");
+		expect(requests[0]?.headers["content-type"]).toBe("application/json");
+		expect(requests[0]?.signal).toBe(abort.signal);
+		expect(jsonBody(requests[0] as RecordedCogneeRequest)).toEqual({
 			type: "qa",
 			datasetName: "main",
 			sessionId: "session",
@@ -208,7 +183,7 @@ describe("Cognee HTTP client", () => {
 	});
 
 	it("recall posts exact camelCase JSON keys", async () => {
-		const { fetch, calls } = fakeFetch(jsonResponse([]));
+		const { fetch, requests } = createFakeCogneeFetch([{ body: [] }]);
 		const client = createCogneeClient({ baseUrl: "http://cognee.local", fetch });
 
 		await client.recall({
@@ -227,8 +202,8 @@ describe("Cognee HTTP client", () => {
 			contextProfile: "profile",
 		});
 
-		expect(calls[0]?.url).toBe("http://cognee.local/api/v1/recall");
-		expect(jsonBody(calls[0])).toEqual({
+		expect(requests[0]?.path).toBe("/api/v1/recall");
+		expect(jsonBody(requests[0] as RecordedCogneeRequest)).toEqual({
 			query: "how to debug",
 			searchType: "GRAPH_COMPLETION",
 			datasets: ["main"],
@@ -254,7 +229,7 @@ describe("Cognee HTTP client", () => {
 			{ node_name: "node" },
 			{ strange: { nested: true } },
 		];
-		const { fetch } = fakeFetch(jsonResponse({ results: raw }));
+		const { fetch } = createFakeCogneeFetch([{ body: { results: raw } }]);
 		const client = createCogneeClient({ baseUrl: "http://cognee.local", fetch });
 
 		const entries = await client.recall({ query: "q" });
@@ -279,14 +254,14 @@ describe("Cognee HTTP client", () => {
 	});
 
 	it("recall returns [] for normal 200 []", async () => {
-		const { fetch } = fakeFetch(jsonResponse([]));
+		const { fetch } = createFakeCogneeFetch([{ body: [] }]);
 		const client = createCogneeClient({ baseUrl: "http://cognee.local", fetch });
 
 		await expect(client.recall({ query: "q" })).resolves.toEqual([]);
 	});
 
 	it("recall returns [] for 403 [] only", async () => {
-		const { fetch } = fakeFetch(jsonResponse([], 403));
+		const { fetch } = createFakeCogneeFetch([{ body: [], status: 403 }]);
 		const client = createCogneeClient({ baseUrl: "http://cognee.local", fetch });
 
 		await expect(client.recall({ query: "q" })).resolves.toEqual([]);
@@ -294,7 +269,7 @@ describe("Cognee HTTP client", () => {
 
 	it("recall throws CogneeError for 403 JSON object and preserves details", async () => {
 		const details = { error: "denied" };
-		const { fetch } = fakeFetch(jsonResponse(details, 403));
+		const { fetch } = createFakeCogneeFetch([{ body: details, status: 403 }]);
 		const client = createCogneeClient({ baseUrl: "http://cognee.local", fetch });
 
 		try {
@@ -308,7 +283,7 @@ describe("Cognee HTTP client", () => {
 	});
 
 	it("improve posts exact camelCase JSON keys and wraps non-object success", async () => {
-		const { fetch, calls } = fakeFetch(jsonResponse("queued"));
+		const { fetch, requests } = createFakeCogneeFetch([{ body: "queued" }]);
 		const client = createCogneeClient({ baseUrl: "http://cognee.local", fetch });
 
 		const result = await client.improve({
@@ -323,8 +298,8 @@ describe("Cognee HTTP client", () => {
 			enrichmentTasks: ["enrich"],
 		});
 
-		expect(calls[0]?.url).toBe("http://cognee.local/api/v1/improve");
-		expect(jsonBody(calls[0])).toEqual({
+		expect(requests[0]?.path).toBe("/api/v1/improve");
+		expect(jsonBody(requests[0] as RecordedCogneeRequest)).toEqual({
 			datasetName: "main",
 			datasetId: "id",
 			sessionIds: ["s"],
@@ -339,13 +314,13 @@ describe("Cognee HTTP client", () => {
 	});
 
 	it("forget posts exact camelCase JSON keys", async () => {
-		const { fetch, calls } = fakeFetch(jsonResponse({ ok: true }));
+		const { fetch, requests } = createFakeCogneeFetch([{ body: { ok: true } }]);
 		const client = createCogneeClient({ baseUrl: "http://cognee.local", fetch });
 
 		await client.forget({ everything: false, dataset: "main", datasetId: "id", dataId: "data", memoryOnly: true });
 
-		expect(calls[0]?.url).toBe("http://cognee.local/api/v1/forget");
-		expect(jsonBody(calls[0])).toEqual({
+		expect(requests[0]?.path).toBe("/api/v1/forget");
+		expect(jsonBody(requests[0] as RecordedCogneeRequest)).toEqual({
 			everything: false,
 			dataset: "main",
 			datasetId: "id",
@@ -355,66 +330,67 @@ describe("Cognee HTTP client", () => {
 	});
 
 	it("listDatasets calls GET and normalizes bare arrays and envelopes", async () => {
-		const { fetch, calls } = fakeFetch(
-			jsonResponse([{ uuid: "id-1", dataset_name: "main", status: "ready" }]),
-			jsonResponse({ data: [{ id: "id-2", name: "other" }] }),
-		);
+		const { fetch, requests } = createFakeCogneeFetch([
+			{ body: [{ uuid: "id-1", dataset_name: "main", status: "ready" }] },
+			{ body: { data: [{ id: "id-2", name: "other" }] } },
+		]);
 		const client = createCogneeClient({ baseUrl: "http://cognee.local", fetch });
 
 		await expect(client.listDatasets()).resolves.toMatchObject([
 			{ id: "id-1", name: "main", status: "ready" },
 		]);
 		await expect(client.listDatasets()).resolves.toMatchObject([{ id: "id-2", name: "other" }]);
-		expect(calls[0]?.method).toBe("GET");
-		expect(calls[0]?.url).toBe("http://cognee.local/api/v1/datasets");
-		expect(calls[1]?.url).toBe("http://cognee.local/api/v1/datasets");
+		expect(requests[0]?.method).toBe("GET");
+		expect(requests[0]?.path).toBe("/api/v1/datasets");
+		expect(requests[1]?.path).toBe("/api/v1/datasets");
 	});
 
 	it("getDatasetStatus sends dataset and pipeline query and returns parsed body unchanged", async () => {
 		const raw = { pipeline_status: "ready" };
-		const { fetch, calls } = fakeFetch(jsonResponse(raw));
+		const { fetch, requests } = createFakeCogneeFetch([{ body: raw }]);
 		const client = createCogneeClient({ baseUrl: "http://cognee.local", fetch });
 
 		await expect(
 			client.getDatasetStatus({ dataset: "ignored", datasetId: "dataset/id", pipeline: "cognify_pipeline" }),
 		).resolves.toEqual(raw);
 
-		const url = new URL(calls[0]?.url ?? "");
-		expect(calls[0]?.method).toBe("GET");
-		expect(`${url.origin}${url.pathname}`).toBe("http://cognee.local/api/v1/datasets/status");
-		expect(url.searchParams.get("dataset")).toBe("dataset/id");
-		expect(url.searchParams.get("pipeline")).toBe("cognify_pipeline");
+		const path = requests[0]?.path ?? "";
+		expect(requests[0]?.method).toBe("GET");
+		expect(path.startsWith("/api/v1/datasets/status")).toBe(true);
+		const query = new URLSearchParams(path.slice(path.indexOf("?")));
+		expect(query.get("dataset")).toBe("dataset/id");
+		expect(query.get("pipeline")).toBe("cognify_pipeline");
 	});
 
 	it("listDatasetData URL-encodes datasetId and returns parsed body unchanged", async () => {
 		const raw = [{ id: "data" }];
-		const { fetch, calls } = fakeFetch(jsonResponse(raw));
+		const { fetch, requests } = createFakeCogneeFetch([{ body: raw }]);
 		const client = createCogneeClient({ baseUrl: "http://cognee.local", fetch });
 
 		await expect(client.listDatasetData("dataset/id with space")).resolves.toEqual(raw);
 
-		expect(calls[0]?.method).toBe("GET");
-		expect(calls[0]?.url).toBe("http://cognee.local/api/v1/datasets/dataset%2Fid%20with%20space/data");
+		expect(requests[0]?.method).toBe("GET");
+		expect(requests[0]?.path).toBe("/api/v1/datasets/dataset%2Fid%20with%20space/data");
 	});
 
 	it("createDataset posts name, forwards AbortSignal, and normalizes the response", async () => {
 		const abort = new AbortController();
 		const raw = { dataset_id: "id", name: "main_dataset", status: "ready" };
-		const { fetch, calls } = fakeFetch(jsonResponse(raw));
+		const { fetch, requests } = createFakeCogneeFetch([{ body: raw }]);
 		const client = createCogneeClient({ baseUrl: "http://cognee.local", fetch });
 
 		const result = await client.createDataset({ name: "main_dataset" }, abort.signal);
 
-		expect(calls[0]?.url).toBe("http://cognee.local/api/v1/datasets");
-		expect(calls[0]?.method).toBe("POST");
-		expect(calls[0]?.signal).toBe(abort.signal);
-		expect(jsonBody(calls[0])).toEqual({ name: "main_dataset" });
+		expect(requests[0]?.path).toBe("/api/v1/datasets");
+		expect(requests[0]?.method).toBe("POST");
+		expect(requests[0]?.signal).toBe(abort.signal);
+		expect(jsonBody(requests[0] as RecordedCogneeRequest)).toEqual({ name: "main_dataset" });
 		expect(result).toEqual({ id: "id", name: "main_dataset", status: "ready", raw });
 	});
 
 	it("non-OK JSON errors throw CogneeError with status and parsed details", async () => {
 		const details = { detail: "bad input" };
-		const { fetch } = fakeFetch(jsonResponse(details, 422));
+		const { fetch } = createFakeCogneeFetch([{ body: details, status: 422 }]);
 		const client = createCogneeClient({ baseUrl: "http://cognee.local", fetch });
 
 		try {
@@ -429,7 +405,7 @@ describe("Cognee HTTP client", () => {
 	});
 
 	it("non-OK text errors throw CogneeError with status and text details", async () => {
-		const { fetch } = fakeFetch(new Response("server down", { status: 500 }));
+		const { fetch } = createFakeCogneeFetch([{ text: "server down", status: 500 }]);
 		const client = createCogneeClient({ baseUrl: "http://cognee.local", fetch });
 
 		try {
@@ -444,7 +420,7 @@ describe("Cognee HTTP client", () => {
 
 	it("network failures throw CogneeError with cause", async () => {
 		const failure = new Error("connect ECONNREFUSED");
-		const { fetch } = fakeFetch(failure);
+		const fetch = rejectingFetch(failure);
 		const client = createCogneeClient({ baseUrl: "http://cognee.local", fetch });
 
 		try {
@@ -461,20 +437,20 @@ describe("Cognee HTTP client", () => {
 	it("abort-shaped fetch rejection is rethrown unchanged", async () => {
 		const abortError = new Error("aborted");
 		abortError.name = "AbortError";
-		const { fetch } = fakeFetch(abortError);
+		const fetch = rejectingFetch(abortError);
 		const client = createCogneeClient({ baseUrl: "http://cognee.local", fetch });
 
 		await expect(client.listDatasets()).rejects.toBe(abortError);
 	});
 
 	it("validation failures happen before fetch", async () => {
-		const { fetch, calls } = fakeFetch();
+		const { fetch, requests } = createFakeCogneeFetch([]);
 		const client = createCogneeClient({ baseUrl: "http://cognee.local", fetch });
 
 		await expect(client.listDatasetData("")).rejects.toBeInstanceOf(CogneeError);
 		await expect(client.recall({ query: "" })).rejects.toBeInstanceOf(CogneeError);
 		await expect(client.rememberEntry({ type: "" })).rejects.toBeInstanceOf(CogneeError);
 		await expect(client.createDataset({ name: "" })).rejects.toBeInstanceOf(CogneeError);
-		expect(calls).toEqual([]);
+		expect(requests).toEqual([]);
 	});
 });
