@@ -458,10 +458,10 @@ export function createFakeCogneeSessionState(
 		scope,
 		session,
 		aliasOf: overrides?.aliasOf,
-		lastRecallSnippet: undefined,
-		lastRetainedAtIso: undefined,
-		lastRetainedTurn: undefined,
-		hasRecalledForFirstTurn: false,
+		lastRecallSnippet: overrides?.lastRecallSnippet,
+		lastRetainedAtIso: overrides?.lastRetainedAtIso,
+		lastRetainedTurn: overrides?.lastRetainedTurn ?? 0,
+		hasRecalledForFirstTurn: overrides?.hasRecalledForFirstTurn ?? Boolean(overrides?.aliasOf),
 		setSessionId(next: string) {
 			record("setSessionId", [next]);
 			if (overrides?.setSessionId) {
