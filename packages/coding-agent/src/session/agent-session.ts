@@ -226,6 +226,11 @@ import { IrcBus, type IrcMessage } from "../irc/bus";
 import { resolveMemoryBackend } from "../memory-backend";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
+import {
+	getCogneeSessionState,
+	setCogneeSessionState,
+	type CogneeSessionStateLike,
+} from "../cognee/state";
 import { containsOrchestrate, ORCHESTRATE_NOTICE } from "../modes/orchestrate";
 import { theme } from "../modes/theme/theme";
 import { parseTurnBudget } from "../modes/turn-budget";
@@ -2659,6 +2664,9 @@ export class AgentSession {
 	getMnemopiSessionState(): MnemopiSessionState | undefined {
 		return getMnemopiSessionState(this);
 	}
+	getCogneeSessionState(): CogneeSessionStateLike | undefined {
+		return getCogneeSessionState(this);
+	}
 
 	/** TTSR manager for time-traveling stream rules */
 	get ttsrManager(): TtsrManager | undefined {
@@ -4979,6 +4987,12 @@ export class AgentSession {
 		if (!sid) return;
 		this.getMnemopiSessionState()?.setSessionId(sid);
 	}
+	#rekeyCogneeMemoryForCurrentSessionId(): void {
+		if (this.settings.get("memory.backend") !== "cognee") return;
+		const sid = this.agent.sessionId;
+		if (!sid) return;
+		this.getCogneeSessionState()?.setSessionId(sid);
+	}
 
 	/** New session file: reset auto-recall / retain-threshold counters for the new transcript. */
 	#resetHindsightConversationTrackingIfHindsight(): boolean {
@@ -4996,17 +5010,25 @@ export class AgentSession {
 		state.resetConversationTracking();
 		return true;
 	}
+	#resetCogneeConversationTrackingIfCognee(): boolean {
+		if (this.settings.get("memory.backend") !== "cognee") return false;
+		const state = this.getCogneeSessionState();
+		if (!state || state.aliasOf) return false;
+		state.resetConversationTracking();
+		return true;
+	}
 
 	async #resetMemoryContextForNewTranscript(): Promise<void> {
 		const hadPromotedMemoryPrompt = this.#baseSystemPromptBeforeMemoryPromotion !== undefined;
 		const resetHindsight = this.#resetHindsightConversationTrackingIfHindsight();
 		const resetMnemopi = this.#resetMnemopiConversationTrackingIfMnemopi();
+		const resetCognee = this.#resetCogneeConversationTrackingIfCognee();
 		if (hadPromotedMemoryPrompt) {
 			this.#baseSystemPrompt = this.#baseSystemPromptBeforeMemoryPromotion!;
 			this.agent.setSystemPrompt(this.#baseSystemPrompt);
 			this.#baseSystemPromptBeforeMemoryPromotion = undefined;
 		}
-		if (resetHindsight || resetMnemopi || hadPromotedMemoryPrompt) {
+		if (resetHindsight || resetMnemopi || resetCognee || hadPromotedMemoryPrompt) {
 			await this.refreshBaseSystemPrompt();
 		}
 	}
@@ -5134,6 +5156,12 @@ export class AgentSession {
 		await hindsightState?.flushRetainQueue();
 		this.setHindsightSessionState(undefined);
 		hindsightState?.dispose();
+		// Cognee retain queue flushes before the side-channel pointer is cleared,
+		// mirroring the Hindsight retain-queue identity contract above.
+		const cogneeState = this.getCogneeSessionState();
+		await cogneeState?.flushRetainQueue();
+		setCogneeSessionState(this, undefined);
+		await cogneeState?.dispose();
 		const mnemopiState = setMnemopiSessionState(this, undefined);
 		await mnemopiState?.dispose();
 		// Tear down the embeddings subprocess AFTER mnemopi state.dispose:
@@ -5174,6 +5202,7 @@ export class AgentSession {
 		this.#syncAgentSessionId();
 		this.#rekeyHindsightMemoryForCurrentSessionId();
 		this.#rekeyMnemopiMemoryForCurrentSessionId();
+		this.#rekeyCogneeMemoryForCurrentSessionId();
 		this.agent.appendOnlyContext?.invalidateForModelChange();
 		return {
 			previousSessionId,
@@ -7903,6 +7932,7 @@ export class AgentSession {
 		this.#syncAgentSessionId();
 		this.#rekeyHindsightMemoryForCurrentSessionId();
 		this.#rekeyMnemopiMemoryForCurrentSessionId();
+		this.#rekeyCogneeMemoryForCurrentSessionId();
 		await this.#resetMemoryContextForNewTranscript();
 		this.#pendingNextTurnMessages = [];
 		this.#scheduledHiddenNextTurnGeneration = undefined;
@@ -8001,6 +8031,7 @@ export class AgentSession {
 		this.#syncAgentSessionId();
 		this.#rekeyHindsightMemoryForCurrentSessionId();
 		this.#rekeyMnemopiMemoryForCurrentSessionId();
+		this.#rekeyCogneeMemoryForCurrentSessionId();
 		await this.#resetMemoryContextForNewTranscript();
 
 		// Emit session_switch event with reason "fork" to hooks
@@ -9299,6 +9330,7 @@ export class AgentSession {
 			this.#syncAgentSessionId();
 			this.#rekeyHindsightMemoryForCurrentSessionId();
 			this.#rekeyMnemopiMemoryForCurrentSessionId();
+			this.#rekeyCogneeMemoryForCurrentSessionId();
 			await this.#resetMemoryContextForNewTranscript();
 			this.#pendingNextTurnMessages = [];
 			this.#scheduledHiddenNextTurnGeneration = undefined;
@@ -13289,6 +13321,7 @@ export class AgentSession {
 			this.#syncAgentSessionId();
 			this.#rekeyHindsightMemoryForCurrentSessionId();
 			this.#rekeyMnemopiMemoryForCurrentSessionId();
+			this.#rekeyCogneeMemoryForCurrentSessionId();
 
 			const sessionContext = this.buildDisplaySessionContext();
 			const didReloadConversationChange =
@@ -13408,6 +13441,7 @@ export class AgentSession {
 			this.#syncAgentSessionId(previousSessionState.sessionId);
 			this.#rekeyHindsightMemoryForCurrentSessionId();
 			this.#rekeyMnemopiMemoryForCurrentSessionId();
+			this.#rekeyCogneeMemoryForCurrentSessionId();
 			let restoreMcpError: unknown;
 			try {
 				// `previousSessionContext` was skipped on different-session switches to
@@ -13510,6 +13544,7 @@ export class AgentSession {
 		this.#syncAgentSessionId();
 		this.#rekeyHindsightMemoryForCurrentSessionId();
 		this.#rekeyMnemopiMemoryForCurrentSessionId();
+		this.#rekeyCogneeMemoryForCurrentSessionId();
 		await this.#resetMemoryContextForNewTranscript();
 
 		// Reload messages from entries (works for both file and in-memory mode)
@@ -13602,6 +13637,7 @@ export class AgentSession {
 		this.#syncAgentSessionId();
 		this.#rekeyHindsightMemoryForCurrentSessionId();
 		this.#rekeyMnemopiMemoryForCurrentSessionId();
+		this.#rekeyCogneeMemoryForCurrentSessionId();
 		await this.#resetMemoryContextForNewTranscript();
 
 		const sessionContext = this.buildDisplaySessionContext();

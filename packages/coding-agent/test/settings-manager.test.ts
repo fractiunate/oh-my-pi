@@ -9,6 +9,7 @@ import type { Context } from "@oh-my-pi/pi-ai/types";
 import {
 	getDefault,
 	getEnumValues,
+	onCogneeScopeChanged,
 	onAppendOnlyModeChanged,
 	onStatusLineSessionAccentChanged,
 	resetSettingsForTest,
@@ -111,6 +112,22 @@ describe("Settings", () => {
 				"gemma",
 				"minimax",
 			]);
+		});
+
+		it("exposes Cognee as a memory backend with contract defaults", () => {
+			expect(getEnumValues("memory.backend")).toEqual(["off", "local", "hindsight", "mnemopi", "cognee"]);
+			expect(Settings.isolated({ "memory.backend": "cognee" }).get("memory.backend")).toBe("cognee");
+			expect(getDefault("cognee.apiUrl")).toBe("http://localhost:8000");
+			expect(getDefault("cognee.scoping")).toBe("per-project-tagged");
+			expect(getDefault("cognee.autoRecall")).toBe(true);
+			expect(getDefault("cognee.autoRetain")).toBe(true);
+			expect(getDefault("cognee.retainMode")).toBe("full-session");
+			expect(getDefault("cognee.recallSearchType")).toBe("GRAPH_COMPLETION");
+			expect(getDefault("cognee.recallScope")).toBe("auto");
+			expect(getDefault("cognee.recallTopK")).toBe(10);
+			expect(getDefault("cognee.sessionMemoryEnabled")).toBe(false);
+			expect(getDefault("cognee.nodeSet")).toEqual([]);
+			expect(getDefault("cognee.ontologyKeys")).toEqual([]);
 		});
 	});
 
@@ -238,6 +255,32 @@ describe("Settings", () => {
 				unsubscribeThrower();
 				unsubscribeOk();
 			}
+		});
+	});
+
+	describe("cognee scope hooks", () => {
+		it("notifies subscribers only for Cognee dataset scoping settings", async () => {
+			const settings = await Settings.init({ inMemory: true });
+			let calls = 0;
+			const unsubscribe = onCogneeScopeChanged(() => {
+				calls++;
+			});
+
+			try {
+				settings.set("cognee.datasetName", "dataset-a");
+				settings.set("cognee.datasetId", "dataset-id-a");
+				settings.set("cognee.datasetNamePrefix", "prefix-a");
+				settings.set("cognee.scoping", "global");
+				expect(calls).toBe(4);
+
+				settings.set("cognee.apiUrl", "http://localhost:8001");
+				expect(calls).toBe(4);
+			} finally {
+				unsubscribe();
+			}
+
+			settings.set("cognee.scoping", "per-project");
+			expect(calls).toBe(4);
 		});
 	});
 
