@@ -87,8 +87,14 @@ function sourceFallbackId(entry: CogneeRecallEntry): string | undefined {
 
 function compactQuestionAnswer(question: unknown, answer: unknown): string {
 	const lines: string[] = [];
-	if (typeof question === "string" && question.trim()) lines.push(`Q: ${question.trim()}`);
-	if (typeof answer === "string" && answer.trim()) lines.push(`A: ${answer.trim()}`);
+	if (typeof question === "string") {
+		const text = question.trim();
+		if (hasCogneeSubstantiveContent(text)) lines.push(`Q: ${text}`);
+	}
+	if (typeof answer === "string") {
+		const text = answer.trim();
+		if (hasCogneeSubstantiveContent(text)) lines.push(`A: ${text}`);
+	}
 	return lines.join("\n");
 }
 

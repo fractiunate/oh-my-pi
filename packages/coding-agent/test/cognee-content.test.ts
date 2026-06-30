@@ -450,6 +450,17 @@ describe("formatCogneeRecallBlock", () => {
 		).toBeUndefined();
 	});
 
+	it("drops non-substantive session question answer fallbacks", () => {
+		expect(
+			formatCogneeRecallBlock(
+				[asEntry({ source: "session", text: "", question: "...", answer: "?!", raw: {} })],
+				config,
+				scope,
+				new Date("2026-06-30T00:00:00.000Z"),
+			),
+		).toBeUndefined();
+	});
+
 	it("renders default preamble, deterministic time, and scope", () => {
 		const block = formatCogneeRecallBlock(
 			[asEntry({ source: "session", id: "entry-1", text: "remember this", raw: {} })],
@@ -544,6 +555,12 @@ describe("formatCogneeSearchItem", () => {
 		expect(formatCogneeSearchItem(asEntry({ source: "trace", traceId: "trace-1", text: "trace", raw: {} })).id).toBe("trace-1");
 		expect(formatCogneeSearchItem(asEntry({ source: "graph", nodeName: "NodeA", text: "graph", raw: {} })).id).toBe("NodeA");
 		expect(formatCogneeSearchItem(asEntry({ source: "unknown", text: "...", raw: {} })).content).toBe("[empty Cognee recall entry]");
+	});
+
+	it("does not count Q/A labels as substantive search content", () => {
+		expect(formatCogneeSearchItem(asEntry({ source: "session", text: "", question: "...", answer: "?!", raw: {} })).content).toBe(
+			"[empty Cognee recall entry]",
+		);
 	});
 });
 
