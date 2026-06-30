@@ -1,4 +1,21 @@
 export type {
+	CogneeConfig,
+	CogneeRecallScope,
+	CogneeRetainMode,
+	CogneeScoping,
+	CogneeSearchType,
+} from "../cognee/config";
+export type {
+	CogneeApiOptions,
+	CogneeClient,
+	CogneeDataset,
+	CogneeRecallEntry,
+	CogneeRememberResult,
+} from "../cognee/client";
+export type { CogneeScope } from "../cognee/scope";
+export type { CogneeSessionStateLike, CogneeSessionStateOptions } from "../cognee/state";
+
+export type {
 	MnemopiBackendConfig,
 	MnemopiLlmMode,
 	MnemopiProviderOptions,
