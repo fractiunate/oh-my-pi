@@ -205,6 +205,10 @@ function userMessage(content: string): AgentMessage {
 	return asAgentMessage({ role: "user", content });
 }
 
+function assistantMessage(content: string): AgentMessage {
+	return asAgentMessage({ role: "assistant", content: [{ type: "text", text: content }] });
+}
+
 function makeOptions(
 	overrides: Partial<CogneeSessionStateOptions> & { session?: FakeSession } = {},
 ): { options: CogneeSessionStateOptions; session: FakeSession; client: FakeClient } {
