@@ -7,6 +7,7 @@ import * as path from "node:path";
 import { prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
 import { resolveAgentModelPatterns } from "../config/model-resolver";
+import type { CogneeSessionStateLike } from "../cognee/state";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
 import { MCPManager } from "../mcp/manager";
@@ -185,6 +186,17 @@ function getOutputManager(session: ToolSession): AgentOutputManager {
 	const manager = new AgentOutputManager(session.getArtifactsDir ?? (() => null));
 	session.agentOutputManager = manager;
 	return manager;
+}
+
+type CogneeEvalToolSession = {
+	getCogneeSessionState?: () => CogneeSessionStateLike | undefined;
+};
+
+function getPrimaryCogneeSessionState(
+	session: CogneeEvalToolSession,
+): CogneeSessionStateLike | undefined {
+	const state = session.getCogneeSessionState?.();
+	return state?.aliasOf ?? state;
 }
 
 interface ArtifactPaths {
@@ -403,6 +415,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 		parentArtifactManager,
 		parentHindsightSessionState: options.session.getHindsightSessionState?.(),
 		parentMnemopiSessionState: options.session.getMnemopiSessionState?.(),
+		parentCogneeSessionState: getPrimaryCogneeSessionState(options.session),
 		parentTelemetry: options.session.getTelemetry?.(),
 		parentAgentId: options.session.getAgentId?.() ?? MAIN_AGENT_ID,
 		// Live source of truth for `tier.subagent: inherit` (null = explicit none).

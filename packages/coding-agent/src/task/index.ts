@@ -63,11 +63,23 @@ import { mapWithConcurrencyLimit, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "./render";
 import { repairTaskParams } from "./repair-args";
 import { parseIsolationMode } from "./worktree";
+import type { CogneeSessionStateLike } from "../cognee/state";
 
 function renderSubagentUserPrompt(assignment: string): string {
 	return prompt.render(subagentUserPromptTemplate, {
 		assignment: assignment.trim(),
 	});
+}
+
+type CogneeToolSession = {
+	getCogneeSessionState?: () => CogneeSessionStateLike | undefined;
+};
+
+function getPrimaryCogneeSessionState(
+	session: CogneeToolSession,
+): CogneeSessionStateLike | undefined {
+	const state = session.getCogneeSessionState?.();
+	return state?.aliasOf ?? state;
 }
 
 function createUsageTotals(): Usage {
@@ -1293,6 +1305,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				parentArtifactManager,
 				parentHindsightSessionState: this.session.getHindsightSessionState?.(),
 				parentMnemopiSessionState: this.session.getMnemopiSessionState?.(),
+				parentCogneeSessionState: getPrimaryCogneeSessionState(this.session),
 				parentTelemetry: this.session.getTelemetry?.(),
 				parentEvalSessionId,
 				parentAgentId: this.session.getAgentId?.() ?? MAIN_AGENT_ID,
