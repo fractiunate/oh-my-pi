@@ -25,6 +25,7 @@ import {
 	setMnemopiSessionState,
 } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
+import { isMemoryToolsBackend, resolveMemoryToolOps } from "@oh-my-pi/pi-coding-agent/tools/memory-ops";
 import { MemoryEditTool } from "@oh-my-pi/pi-coding-agent/tools/memory-edit";
 import { MemoryRecallTool } from "@oh-my-pi/pi-coding-agent/tools/memory-recall";
 import { MemoryReflectTool } from "@oh-my-pi/pi-coding-agent/tools/memory-reflect";
@@ -242,6 +243,183 @@ describe("Mnemopi tool factories", () => {
 		expect(MemoryRecallTool.createIf(session)).toBeInstanceOf(MemoryRecallTool);
 		expect(MemoryReflectTool.createIf(session)).toBeInstanceOf(MemoryReflectTool);
 		expect(MemoryEditTool.createIf(session)).toBeInstanceOf(MemoryEditTool);
+	});
+});
+
+describe("MemoryToolOps seam", () => {
+	function fakeBackendSession(backend: unknown, extra: Record<string, unknown> = {}): ToolSession {
+		const settings = {
+			get: (key: string) => (key === "memory.backend" ? backend : undefined),
+		};
+		return {
+			cwd: "/tmp",
+			hasUI: false,
+			settings,
+			getSessionFile: () => null,
+			getSessionId: () => TEST_SESSION_ID,
+			getSessionSpawns: () => null,
+			...extra,
+		} as unknown as ToolSession;
+	}
+
+	it("recognises only memory tool backends", () => {
+		expect(isMemoryToolsBackend("hindsight")).toBe(true);
+		expect(isMemoryToolsBackend("mnemopi")).toBe(true);
+		expect(isMemoryToolsBackend("cognee")).toBe(true);
+		expect(isMemoryToolsBackend("off")).toBe(false);
+		expect(isMemoryToolsBackend("local")).toBe(false);
+		expect(isMemoryToolsBackend(undefined)).toBe(false);
+		expect(isMemoryToolsBackend(null)).toBe(false);
+		expect(isMemoryToolsBackend("unknown")).toBe(false);
+	});
+
+	it("resolves adapters only for supported backends", () => {
+		expect(resolveMemoryToolOps(fakeBackendSession("off"))).toBeNull();
+		expect(resolveMemoryToolOps(fakeBackendSession("local"))).toBeNull();
+		expect(resolveMemoryToolOps(fakeBackendSession("unknown"))).toBeNull();
+
+		expect(resolveMemoryToolOps(makeSession(Settings.isolated({ "memory.backend": "hindsight" })))).toMatchObject({
+			backend: "hindsight",
+			supportsReflect: true,
+			supportsEdit: false,
+		});
+		expect(resolveMemoryToolOps(makeSession(Settings.isolated({ "memory.backend": "mnemopi" })))).toMatchObject({
+			backend: "mnemopi",
+			supportsReflect: true,
+			supportsEdit: true,
+		});
+		expect(resolveMemoryToolOps(fakeBackendSession("cognee"))).toMatchObject({
+			backend: "cognee",
+			supportsReflect: true,
+			supportsEdit: false,
+		});
+	});
+
+	it("queues Cognee retain items through structural state", async () => {
+		const retained: Array<{ content: string; context?: string }> = [];
+		const ops = resolveMemoryToolOps(
+			fakeBackendSession("cognee", {
+				getCogneeSessionState: () => ({
+					sessionId: "cognee-session",
+					enqueueRetain: (content: string, context?: string) => retained.push({ content, context }),
+					search: async () => ({ backend: "off", query: "", count: 0, items: [] }),
+					save: async () => ({ backend: "off", stored: 1 }),
+				}),
+			}),
+		)!;
+
+		const result = await ops.retain([
+			{ content: "first", context: "ctx" },
+			{ content: "second" },
+		]);
+
+		expect(retained).toEqual([{ content: "first", context: "ctx" }, { content: "second", context: undefined }]);
+		expect(result.content[0]).toEqual({ type: "text", text: "2 memories queued." });
+		expect(result.details).toEqual({ count: 2 });
+	});
+
+	it("formats Cognee recall results and forwards options", async () => {
+		const controller = new AbortController();
+		const searchCalls: Array<{ query: string; options?: unknown }> = [];
+		const ops = resolveMemoryToolOps(
+			fakeBackendSession("cognee", {
+				getCogneeSessionState: () => ({
+					sessionId: "cognee-session",
+					enqueueRetain: () => {},
+					search: async (query: string, options?: unknown) => {
+						searchCalls.push({ query, options });
+						return query === "empty"
+							? { backend: "off", query, count: 0, items: [] }
+							: {
+									backend: "off",
+									query,
+									count: 2,
+									items: [
+										{
+											id: "mem-1",
+											content: "Use Bun APIs.",
+											source: "learned.md",
+											timestamp: "2026-06-30T10:20:30Z",
+											score: 0.86,
+										},
+										{ content: "Prefer concise output." },
+									],
+								};
+					},
+					save: async () => ({ backend: "off", stored: 1 }),
+				}),
+			}),
+		)!;
+
+		const empty = await ops.recall("empty", { signal: controller.signal });
+		expect(empty.content[0]).toEqual({ type: "text", text: "No relevant memories found." });
+		expect(empty.useless).toBe(true);
+
+		const result = await ops.recall("query", { signal: controller.signal });
+		const textItem = result.content[0];
+		if (textItem.type !== "text") throw new Error("Expected text result");
+		const text = textItem.text;
+		expect(searchCalls).toEqual([
+			{ query: "empty", options: { signal: controller.signal } },
+			{ query: "query", options: { signal: controller.signal } },
+		]);
+		expect(text).toMatch(/^Found 2 relevant memories \(as of \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC\)/);
+		expect(text).toContain("- Use Bun APIs. (id: mem-1) [learned.md] (2026-06-30) c:0.9");
+		expect(text).toContain("- Prefer concise output.");
+	});
+
+	it("formats Cognee reflect results and forwards context with signal", async () => {
+		const controller = new AbortController();
+		const searchCalls: Array<{ query: string; options?: unknown }> = [];
+		const ops = resolveMemoryToolOps(
+			fakeBackendSession("cognee", {
+				getCogneeSessionState: () => ({
+					sessionId: "cognee-session",
+					enqueueRetain: () => {},
+					search: async (query: string, options?: unknown) => {
+						searchCalls.push({ query, options });
+						return query.startsWith("empty")
+							? { backend: "off", query, count: 0, items: [] }
+							: { backend: "off", query, count: 1, items: [{ id: "mem-2", content: "Ship narrow changes." }] };
+					},
+					save: async () => ({ backend: "off", stored: 1 }),
+				}),
+			}),
+		)!;
+
+		const empty = await ops.reflect("empty question", "extra context", controller.signal);
+		expect(empty.content[0]).toEqual({ type: "text", text: "No relevant information found to reflect on." });
+
+		const result = await ops.reflect("what matters?", "repo context", controller.signal);
+		const textItem = result.content[0];
+		if (textItem.type !== "text") throw new Error("Expected text result");
+		const text = textItem.text;
+		expect(searchCalls).toEqual([
+			{ query: "empty question\n\nAdditional context:\nextra context", options: { signal: controller.signal } },
+			{ query: "what matters?\n\nAdditional context:\nrepo context", options: { signal: controller.signal } },
+		]);
+		expect(text).toContain("Based on recalled memories:");
+		expect(text).toContain("- Ship narrow changes. (id: mem-2)");
+	});
+
+	it("throws Cognee initialization errors at execution time", async () => {
+		const ops = resolveMemoryToolOps(fakeBackendSession("cognee"))!;
+		expect(ops.backend).toBe("cognee");
+		await expect(ops.retain([{ content: "x" }])).rejects.toThrow(
+			"Cognee backend is not initialised for this session.",
+		);
+		await expect(ops.recall("x")).rejects.toThrow("Cognee backend is not initialised for this session.");
+		await expect(ops.reflect("x")).rejects.toThrow("Cognee backend is not initialised for this session.");
+		await expect(ops.save?.({ content: "x" })).rejects.toThrow(
+			"Cognee backend is not initialised for this session.",
+		);
+	});
+
+	it("direct tool factories accept Cognee through the seam", () => {
+		const session = fakeBackendSession("cognee");
+		expect(MemoryRetainTool.createIf(session)).toBeInstanceOf(MemoryRetainTool);
+		expect(MemoryRecallTool.createIf(session)).toBeInstanceOf(MemoryRecallTool);
+		expect(MemoryReflectTool.createIf(session)).toBeInstanceOf(MemoryReflectTool);
 	});
 });
 
