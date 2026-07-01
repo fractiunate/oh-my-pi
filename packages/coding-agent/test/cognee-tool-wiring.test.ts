@@ -41,16 +41,12 @@ describe("Cognee tool wiring (createTools)", () => {
 		});
 
 		it("auto-includes learn for cognee when autolearn.enabled is true", async () => {
-			const tools = await createTools(
-				makeSession({ "memory.backend": "cognee", "autolearn.enabled": true }),
-			);
+			const tools = await createTools(makeSession({ "memory.backend": "cognee", "autolearn.enabled": true }));
 			expect(tools.map(t => t.name)).toContain("learn");
 		});
 
 		it("excludes learn for cognee when autolearn.enabled is false", async () => {
-			const tools = await createTools(
-				makeSession({ "memory.backend": "cognee", "autolearn.enabled": false }),
-			);
+			const tools = await createTools(makeSession({ "memory.backend": "cognee", "autolearn.enabled": false }));
 			expect(tools.map(t => t.name)).not.toContain("learn");
 		});
 
@@ -83,10 +79,9 @@ describe("Cognee tool wiring (createTools)", () => {
 		});
 
 		it("force-includes learn into a restricted list for cognee + autolearn", async () => {
-			const tools = await createTools(
-				makeSession({ "memory.backend": "cognee", "autolearn.enabled": true }),
-				["read"],
-			);
+			const tools = await createTools(makeSession({ "memory.backend": "cognee", "autolearn.enabled": true }), [
+				"read",
+			]);
 			expect(tools.map(t => t.name)).toContain("learn");
 		});
 
@@ -109,9 +104,7 @@ describe("Cognee tool wiring (createTools)", () => {
 
 	describe("subagent gating (taskDepth > 0)", () => {
 		it("still offers retain/recall/reflect to a cognee subagent (not depth-gated)", async () => {
-			const tools = await createTools(
-				makeSession({ "memory.backend": "cognee" }, { taskDepth: 1 }),
-			);
+			const tools = await createTools(makeSession({ "memory.backend": "cognee" }, { taskDepth: 1 }));
 			const names = tools.map(t => t.name);
 
 			expect(names).toContain("retain");

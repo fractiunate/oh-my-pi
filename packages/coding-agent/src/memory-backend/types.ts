@@ -7,11 +7,11 @@
  */
 
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { CogneeSessionStateLike } from "../cognee/state";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import type { HindsightSessionState } from "../hindsight/state";
 import type { MnemopiSessionState } from "../mnemopi/state";
-import type { CogneeSessionStateLike } from "../cognee/state";
 import type { AgentSession } from "../session/agent-session";
 
 export type MemoryBackendId = "off" | "local" | "hindsight" | "mnemopi" | "cognee";

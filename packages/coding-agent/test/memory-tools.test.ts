@@ -25,8 +25,8 @@ import {
 	setMnemopiSessionState,
 } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
-import { isMemoryToolsBackend, resolveMemoryToolOps } from "@oh-my-pi/pi-coding-agent/tools/memory-ops";
 import { MemoryEditTool } from "@oh-my-pi/pi-coding-agent/tools/memory-edit";
+import { isMemoryToolsBackend, resolveMemoryToolOps } from "@oh-my-pi/pi-coding-agent/tools/memory-ops";
 import { MemoryRecallTool } from "@oh-my-pi/pi-coding-agent/tools/memory-recall";
 import { MemoryReflectTool } from "@oh-my-pi/pi-coding-agent/tools/memory-reflect";
 import { MemoryRetainTool } from "@oh-my-pi/pi-coding-agent/tools/memory-retain";
@@ -308,14 +308,42 @@ describe("MemoryToolOps seam", () => {
 			}),
 		)!;
 
-		const result = await ops.retain([
-			{ content: "first", context: "ctx" },
-			{ content: "second" },
-		]);
+		const result = await ops.retain([{ content: "first", context: "ctx" }, { content: "second" }]);
 
-		expect(retained).toEqual([{ content: "first", context: "ctx" }, { content: "second", context: undefined }]);
+		expect(retained).toEqual([
+			{ content: "first", context: "ctx" },
+			{ content: "second", context: undefined },
+		]);
 		expect(result.content[0]).toEqual({ type: "text", text: "2 memories queued." });
 		expect(result.details).toEqual({ count: 2 });
+	});
+
+	it("initializes Cognee state through the ToolSession ensure seam", async () => {
+		const retained: string[] = [];
+		let ensureCalls = 0;
+		const cogneeState = {
+			sessionId: "cognee-session",
+			enqueueRetain: (content: string) => retained.push(content),
+			search: async () => ({ backend: "off", query: "", count: 0, items: [] }),
+			save: async () => ({ backend: "off", stored: 1 }),
+		};
+		let installed = false;
+		const ops = resolveMemoryToolOps(
+			fakeBackendSession("cognee", {
+				getCogneeSessionState: () => (installed ? cogneeState : undefined),
+				ensureCogneeSessionState: async () => {
+					ensureCalls += 1;
+					installed = true;
+					return cogneeState;
+				},
+			}),
+		)!;
+
+		const result = await ops.retain([{ content: "after-startup-race" }]);
+
+		expect(ensureCalls).toBe(1);
+		expect(retained).toEqual(["after-startup-race"]);
+		expect(result.content[0]).toEqual({ type: "text", text: "1 memory queued." });
 	});
 
 	it("formats Cognee recall results and forwards options", async () => {
@@ -456,9 +484,7 @@ describe("MemoryToolOps seam", () => {
 		);
 		await expect(ops.recall("x")).rejects.toThrow("Cognee backend is not initialised for this session.");
 		await expect(ops.reflect("x")).rejects.toThrow("Cognee backend is not initialised for this session.");
-		await expect(ops.save?.({ content: "x" })).rejects.toThrow(
-			"Cognee backend is not initialised for this session.",
-		);
+		await expect(ops.save?.({ content: "x" })).rejects.toThrow("Cognee backend is not initialised for this session.");
 	});
 
 	it("direct tool factories accept Cognee through the seam", () => {

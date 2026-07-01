@@ -11,8 +11,7 @@ export interface CogneeMessage {
 
 export interface CogneeRetentionDocument {
 	content: string;
-	documentId: string;
-	contentType: "text/markdown";
+	filename: string;
 }
 
 const COGNEE_MEMORIES_REGEX = /<cognee_memories>[\s\S]*?<\/cognee_memories>/g;
@@ -79,9 +78,9 @@ function scoreToDisplay(score: number): string {
 
 function sourceFallbackId(entry: CogneeRecallEntry): string | undefined {
 	if (entry.id) return entry.id;
-	if (entry.source === "session" && entry.qaId) return entry.qaId;
-	if (entry.source === "trace" && entry.traceId) return entry.traceId;
-	if (entry.source === "graph" && entry.nodeName) return entry.nodeName;
+	if (entry.source === "session" && "qaId" in entry && entry.qaId) return entry.qaId;
+	if (entry.source === "trace" && "traceId" in entry && entry.traceId) return entry.traceId;
+	if (entry.source === "graph" && "nodeName" in entry && entry.nodeName) return entry.nodeName;
 	return undefined;
 }
 
@@ -102,11 +101,11 @@ function entryDisplayText(entry: CogneeRecallEntry): string {
 	const text = typeof entry.text === "string" ? entry.text.trim() : "";
 	if (text) return text;
 
-	if (entry.source === "session") {
+	if (entry.source === "session" && ("question" in entry || "answer" in entry)) {
 		return compactQuestionAnswer(entry.question, entry.answer);
 	}
 
-	if (entry.source === "graph_context" || entry.source === "session_context") {
+	if ((entry.source === "graph_context" || entry.source === "session_context") && "context" in entry) {
 		return typeof entry.context === "string" ? entry.context.trim() : "";
 	}
 
@@ -127,7 +126,12 @@ function formatScopePlusLatest(scopeLines: string[], latest: string): string {
 	return `${scopeLines.join("\n")}\n\nLatest prompt:\n${latest}`;
 }
 
-function buildRecallQueryCandidate(scopeLines: string[], contextLines: string[], latest: string, useLatestSection: boolean): string {
+function buildRecallQueryCandidate(
+	scopeLines: string[],
+	contextLines: string[],
+	latest: string,
+	useLatestSection: boolean,
+): string {
 	if (contextLines.length > 0) {
 		const prefix = scopeLines.length > 0 ? `${scopeLines.join("\n")}\n\n` : "";
 		return `${prefix}Prior context:\n${contextLines.join("\n")}\n\nLatest prompt:\n${latest}`;
@@ -136,7 +140,11 @@ function buildRecallQueryCandidate(scopeLines: string[], contextLines: string[],
 	return latest;
 }
 
-function parseCogneeRecallQuery(query: string): { scopeLines: string[]; contextLines: string[]; useLatestSection: boolean } {
+function parseCogneeRecallQuery(query: string): {
+	scopeLines: string[];
+	contextLines: string[];
+	useLatestSection: boolean;
+} {
 	const priorMarker = "Prior context:\n";
 	const latestMarker = "Latest prompt:\n";
 	const priorIndex = query.indexOf(priorMarker);
@@ -277,8 +285,33 @@ export function truncateCogneeRecallQuery(query: string, latestPrompt: string, m
 		keptContextLines.unshift(parsed.contextLines[i]);
 	}
 
-	const candidate = buildRecallQueryCandidate(scopeLines, keptContextLines, latest, scopeLines.length > 0 || parsed.useLatestSection);
+	const candidate = buildRecallQueryCandidate(
+		scopeLines,
+		keptContextLines,
+		latest,
+		scopeLines.length > 0 || parsed.useLatestSection,
+	);
 	return candidate.length <= maxChars ? candidate : latestOnly;
+}
+
+function sanitizeCogneeDocumentSegment(value: string | undefined): string {
+	const segment = value
+		?.trim()
+		.replace(/[^A-Za-z0-9._-]+/g, "-")
+		.replace(/^-+|-+$/g, "");
+	return segment || "unknown";
+}
+
+export function formatCogneeDocumentFilename(
+	retainedAt: Date,
+	folderLabel: string | undefined,
+	suffix?: string,
+): string {
+	const timestamp = retainedAt.toISOString().replace(/[:.]/g, "-");
+	const parts = [timestamp, sanitizeCogneeDocumentSegment(folderLabel)];
+	const safeSuffix = sanitizeCogneeDocumentSegment(suffix);
+	if (suffix !== undefined) parts.push(safeSuffix);
+	return `${parts.join("-")}.txt`;
 }
 
 export function prepareCogneeRetentionDocument(args: {
@@ -289,18 +322,16 @@ export function prepareCogneeRetentionDocument(args: {
 	retainEveryNTurns: number;
 	retainOverlapTurns: number;
 	scope: CogneeScope;
+	documentLabel?: string;
 }): CogneeRetentionDocument | null {
 	if (args.messages.length === 0) return null;
 
 	let targetMessages: CogneeMessage[];
-	let documentId: string;
 	if (args.mode === "full-session") {
 		targetMessages = args.messages;
-		documentId = args.sessionId;
 	} else {
 		const windowTurns = Math.max(1, args.retainEveryNTurns + args.retainOverlapTurns);
 		targetMessages = sliceLastCogneeTurnsByUserBoundary(args.messages, windowTurns);
-		documentId = `${args.sessionId}-${args.retainedAt.getTime()}`;
 	}
 
 	const sections: string[] = [];
@@ -317,8 +348,10 @@ export function prepareCogneeRetentionDocument(args: {
 
 	return {
 		content: `${headerLines.join("\n")}\n\n${sections.join("\n\n")}`,
-		documentId,
-		contentType: "text/markdown",
+		filename: formatCogneeDocumentFilename(
+			args.retainedAt,
+			args.documentLabel ?? args.scope.projectLabel ?? args.scope.label,
+		),
 	};
 }
 

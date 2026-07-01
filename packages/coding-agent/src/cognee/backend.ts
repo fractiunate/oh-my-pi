@@ -23,11 +23,11 @@ import type {
 	MemoryBackendStatus,
 } from "../memory-backend/types";
 import type { AgentSession } from "../session/agent-session";
+import { type CogneeClient, createCogneeClient } from "./client";
+import { type CogneeConfig, isCogneeConfigured, loadCogneeConfig } from "./config";
 import { truncateApproxTokensOrChars } from "./content";
-import { createCogneeClient } from "./client";
-import { isCogneeConfigured, loadCogneeConfig, type CogneeConfig } from "./config";
-import { computeCogneeScope, type CogneeScope } from "./scope";
-import { CogneeSessionState, getCogneeSessionState, setCogneeSessionState, type CogneeSessionStateLike } from "./state";
+import { type CogneeScope, computeCogneeScope } from "./scope";
+import { CogneeSessionState, type CogneeSessionStateLike, getCogneeSessionState, setCogneeSessionState } from "./state";
 
 const STATIC_INSTRUCTIONS =
 	"## Cognee Memory\n\n" +
@@ -43,6 +43,7 @@ interface PrimaryRebuildTask {
 }
 
 const primaryRebuildTasks = new WeakMap<AgentSession, PrimaryRebuildTask>();
+const primaryInstallTasks = new WeakMap<AgentSession, Promise<CogneeSessionStateLike | undefined>>();
 const scopeUnsubscribes = new WeakMap<AgentSession, () => void>();
 
 /** Dispose a state best-effort; log disposal errors at debug/warn level. */
@@ -75,10 +76,7 @@ function unsubscribeScope(session: AgentSession): void {
 }
 
 /** Clear installed state for a session: optional flush, unset, unsubscribe, dispose. */
-async function clearInstalledState(
-	session: AgentSession,
-	options?: { flush?: boolean },
-): Promise<void> {
+async function clearInstalledState(session: AgentSession, options?: { flush?: boolean }): Promise<void> {
 	const current = getCogneeSessionState(session);
 	if (options?.flush) {
 		try {
@@ -139,6 +137,38 @@ function configRoutingEqual(a: CogneeConfig, b: CogneeConfig): boolean {
 function primaryState(session?: AgentSession): CogneeSessionStateLike | undefined {
 	const state = getCogneeSessionState(session);
 	return state?.aliasOf ?? state;
+}
+
+/** Resolve the best available session id for backend state creation. */
+function resolveSessionId(session: AgentSession): string | undefined {
+	const direct = session.sessionId;
+	if (direct) return direct;
+	const fallback = session.sessionManager.getSessionId();
+	return fallback || undefined;
+}
+
+/**
+ * Install state on demand when a memory tool runs before the async startup task
+ * has finished (or startup ran before the session id was available).
+ */
+async function ensureInstalledState(session: AgentSession | undefined): Promise<CogneeSessionStateLike | undefined> {
+	const current = getCogneeSessionState(session);
+	if (current || !session) return current;
+	if (session.settings.get("memory.backend") !== "cognee") return undefined;
+	return await installPrimaryStateCoalesced(session, session.settings);
+}
+
+function installPrimaryStateCoalesced(
+	session: AgentSession,
+	settings: Settings,
+): Promise<CogneeSessionStateLike | undefined> {
+	const current = primaryInstallTasks.get(session);
+	if (current) return current;
+	const next = installPrimaryState(session, settings).finally(() => {
+		if (primaryInstallTasks.get(session) === next) primaryInstallTasks.delete(session);
+	});
+	primaryInstallTasks.set(session, next);
+	return next;
 }
 
 /**
@@ -213,7 +243,7 @@ async function installPrimaryState(
 	session: AgentSession,
 	settings: Settings,
 ): Promise<CogneeSessionStateLike | undefined> {
-	const sessionId = session.sessionId;
+	const sessionId = resolveSessionId(session);
 	if (!sessionId) return undefined;
 
 	const config = loadCogneeConfig(settings);
@@ -266,7 +296,10 @@ async function installPrimaryState(
 
 	// Subscribe BEFORE installing: if the operator manages to flip another
 	// setting between install and subscribe, we'd miss the edge.
-	scopeUnsubscribes.set(session, onCogneeScopeChanged(() => schedulePrimaryStateRebuild(session)));
+	scopeUnsubscribes.set(
+		session,
+		onCogneeScopeChanged(() => schedulePrimaryStateRebuild(session)),
+	);
 
 	const displaced = setCogneeSessionState(session, state);
 	if (displaced && displaced !== previous) {
@@ -317,9 +350,8 @@ export const cogneeBackend: MemoryBackend = {
 	async start(options: MemoryBackendStartOptions): Promise<void> {
 		const { session, settings, taskDepth } = options;
 		try {
-			const sessionId = session.sessionId;
+			const sessionId = resolveSessionId(session);
 			if (!sessionId) return;
-
 			// Subagents alias the parent's state so recall/retain/reflect tool
 			// calls persist to the same Cognee dataset. Auto-recall and
 			// auto-retain stay with the parent — running them per subagent
@@ -359,7 +391,7 @@ export const cogneeBackend: MemoryBackend = {
 				return;
 			}
 
-			await installPrimaryState(session, settings);
+			await installPrimaryStateCoalesced(session, settings);
 		} catch (err) {
 			logger.warn("Cognee: backend startup failed", { error: String(err) });
 			await clearInstalledState(session, { flush: false }).catch(clearErr => {
@@ -427,7 +459,8 @@ export const cogneeBackend: MemoryBackend = {
 	},
 
 	async status(context: MemoryBackendOperationContext): Promise<MemoryBackendStatus> {
-		const primary = primaryState(context.session);
+		const state = await ensureInstalledState(context.session);
+		const primary = state?.aliasOf ?? state;
 		if (!primary) {
 			return {
 				backend: "cognee",
@@ -457,7 +490,7 @@ export const cogneeBackend: MemoryBackend = {
 		query: string,
 		options?: MemoryBackendSearchOptions,
 	): Promise<MemoryBackendSearchResult> {
-		const state = getCogneeSessionState(context.session);
+		const state = await ensureInstalledState(context.session);
 		if (!state) {
 			return { backend: "cognee", query, count: 0, items: [], message: INERT_MESSAGE };
 		}
@@ -474,11 +507,8 @@ export const cogneeBackend: MemoryBackend = {
 		return { ...result, backend: "cognee", query };
 	},
 
-	async save(
-		context: MemoryBackendOperationContext,
-		input: MemoryBackendSaveInput,
-	): Promise<MemoryBackendSaveResult> {
-		const state = getCogneeSessionState(context.session);
+	async save(context: MemoryBackendOperationContext, input: MemoryBackendSaveInput): Promise<MemoryBackendSaveResult> {
+		const state = await ensureInstalledState(context.session);
 		if (!state) {
 			return { backend: "cognee", stored: 0, message: INERT_MESSAGE };
 		}
@@ -495,7 +525,7 @@ export const cogneeBackend: MemoryBackend = {
 
 		let config: CogneeConfig | undefined;
 		let scope: CogneeScope | undefined;
-		let client = undefined as ReturnType<typeof createCogneeClient> | undefined;
+		let client: CogneeClient | undefined;
 
 		const primary = primaryState(session);
 		if (primary) {
@@ -510,11 +540,7 @@ export const cogneeBackend: MemoryBackend = {
 				lines.push("Cognee is not configured (`cognee.apiUrl` is unset). No server contact attempted.");
 				return lines.join("\n");
 			}
-			scope = computeCogneeScope(
-				config,
-				cwd,
-				config.sessionMemoryEnabled ? session.sessionId : undefined,
-			);
+			scope = computeCogneeScope(config, cwd, config.sessionMemoryEnabled ? session.sessionId : undefined);
 			client = createCogneeClient({ baseUrl: config.apiUrl, apiKey: config.apiKey ?? undefined });
 		} else {
 			lines.push("Configured: no");
@@ -547,9 +573,7 @@ export const cogneeBackend: MemoryBackend = {
 			try {
 				const datasets = await client.listDatasets();
 				lines.push(`Dataset count: ${datasets.length}`);
-				const match = scope.datasetName
-					? datasets.find(d => d.name === scope!.datasetName)
-					: undefined;
+				const match = scope.datasetName ? datasets.find(d => d.name === scope!.datasetName) : undefined;
 				lines.push(`Retain dataset present: ${match ? "yes" : "no"}`);
 			} catch (err) {
 				lines.push(`Dataset list failed: ${safeErrorMessage(err)}`);
@@ -564,7 +588,7 @@ export const cogneeBackend: MemoryBackend = {
 
 		let config: CogneeConfig | undefined;
 		let scope: CogneeScope | undefined;
-		let client = undefined as ReturnType<typeof createCogneeClient> | undefined;
+		let client: CogneeClient | undefined;
 
 		const primary = primaryState(session);
 		if (primary) {
@@ -638,9 +662,7 @@ export const cogneeBackend: MemoryBackend = {
 			lines.push(`hasRecalledForFirstTurn: ${primary.hasRecalledForFirstTurn}`);
 			lines.push(`lastRetainedAtIso: ${primary.lastRetainedAtIso ?? "<never>"}`);
 			const snippet = primary.lastRecallSnippet;
-			lines.push(
-				`lastRecallSnippet: ${snippet ? `present (${snippet.length} chars)` : "absent"}`,
-			);
+			lines.push(`lastRecallSnippet: ${snippet ? `present (${snippet.length} chars)` : "absent"}`);
 			if (snippet) {
 				lines.push(`lastRecallSnippet preview: ${safePreview(snippet)}`);
 			}

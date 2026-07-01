@@ -10,18 +10,14 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { resetSettingsForTest, Settings } from "../src/config/settings";
-import type { AgentSessionEventListener } from "../src/session/agent-session";
-import type { CogneeClient } from "../src/cognee/client";
-import type { CogneeScope } from "../src/cognee/scope";
-import type { CogneeConfig } from "../src/cognee/config";
 import { cogneeBackend } from "../src/cognee/backend";
+import type { CogneeClient } from "../src/cognee/client";
+import type { CogneeConfig } from "../src/cognee/config";
+import type { CogneeScope } from "../src/cognee/scope";
 import { getCogneeSessionState } from "../src/cognee/state";
-import {
-	createFakeCogneeFetch,
-	type FakeCogneeFetchResponse,
-	type RecordedCogneeRequest,
-} from "./helpers/cognee";
+import { resetSettingsForTest, Settings } from "../src/config/settings";
+import type { AgentSession, AgentSessionEventListener } from "../src/session/agent-session";
+import { createFakeCogneeFetch, type FakeCogneeFetchResponse, type RecordedCogneeRequest } from "./helpers/cognee";
 
 // ─── Fakes ──────────────────────────────────────────────────────────────────
 
@@ -44,8 +40,7 @@ function installThrowingFetchGetter(message: string): () => void {
 			Object.defineProperty(globalThis, "fetch", descriptor);
 			return;
 		}
-		const host: typeof globalThis & { fetch?: typeof fetch } = globalThis;
-		delete host.fetch;
+		Reflect.deleteProperty(globalThis, "fetch");
 	};
 }
 
@@ -63,10 +58,16 @@ function jsonRequestBody(request: RecordedCogneeRequest): Record<string, unknown
 interface FakeSessionDeps {
 	sessionId: string | null;
 	cwd?: string;
+	managerSessionId?: string;
 	settings?: Settings;
 }
+type FakeCogneeSession = AgentSession & {
+	notices: Array<{ level: string; message: string; source?: string }>;
+	listenerCount(): number;
+	emit(event: Parameters<AgentSessionEventListener>[0]): void;
+};
 
-function makeFakeSession(deps: FakeSessionDeps) {
+function makeFakeSession(deps: FakeSessionDeps): FakeCogneeSession {
 	const listeners = new Set<AgentSessionEventListener>();
 	const notices: Array<{ level: string; message: string; source?: string }> = [];
 	const session = {
@@ -75,7 +76,7 @@ function makeFakeSession(deps: FakeSessionDeps) {
 		notices,
 		sessionManager: {
 			getCwd: () => deps.cwd ?? "/tmp",
-			getSessionId: () => deps.sessionId ?? "",
+			getSessionId: () => deps.managerSessionId ?? deps.sessionId ?? "",
 			getSessionFile: () => null,
 			getEntries: () => [],
 		},
@@ -94,7 +95,7 @@ function makeFakeSession(deps: FakeSessionDeps) {
 			notices.push({ level, message, source });
 		},
 	};
-	return session;
+	return session as unknown as FakeCogneeSession;
 }
 
 function makeConfiguredSettings(overrides: Record<string, unknown> = {}): Settings {
@@ -241,6 +242,22 @@ describe("cogneeBackend.start", () => {
 		});
 
 		expect(getCogneeSessionState(session)).toBeUndefined();
+	});
+
+	it("uses the session manager id when agent session id is not populated yet", async () => {
+		const settings = makeConfiguredSettings();
+		const session = makeFakeSession({ sessionId: null, managerSessionId: "late-session-id", settings });
+
+		await cogneeBackend.start({
+			session: session as never,
+			settings,
+			modelRegistry: {} as never,
+			agentDir: "/tmp",
+			taskDepth: 0,
+		});
+
+		const state = getCogneeSessionState(session);
+		expect(state?.sessionId).toBe("late-session-id");
 	});
 });
 
@@ -401,11 +418,9 @@ describe("cogneeBackend.search", () => {
 		});
 		const controller = new AbortController();
 		controller.abort();
-		const res = await cogneeBackend.search!(
-			{ agentDir: "/tmp", cwd: "/tmp", session: session as never },
-			"q",
-			{ signal: controller.signal },
-		);
+		const res = await cogneeBackend.search!({ agentDir: "/tmp", cwd: "/tmp", session: session as never }, "q", {
+			signal: controller.signal,
+		});
 		expect(res.message).toBe("Search aborted.");
 	});
 
@@ -436,9 +451,27 @@ describe("cogneeBackend.search", () => {
 describe("cogneeBackend.save", () => {
 	it("returns unavailable without state", async () => {
 		const session = makeFakeSession({ sessionId: "s-save" });
-		const res = await cogneeBackend.save!({ agentDir: "/tmp", cwd: "/tmp", session: session as never }, { content: "x" });
+		const res = await cogneeBackend.save!(
+			{ agentDir: "/tmp", cwd: "/tmp", session: session as never },
+			{ content: "x" },
+		);
 		expect(res).toMatchObject({ backend: "cognee", stored: 0 });
 		expect(res.message).toBe("Cognee backend is not initialised for this session.");
+	});
+
+	it("initializes lazily when save runs before backend startup finishes", async () => {
+		const settings = makeConfiguredSettings();
+		const session = makeFakeSession({ sessionId: "s-lazy", settings });
+		installFakeCogneeFetch([{ body: { status: "ok", data_id: "lazy-id" } }]);
+
+		const res = await cogneeBackend.save!(
+			{ agentDir: "/tmp", cwd: "/tmp", session: session as never },
+			{ content: "lazy memory" },
+		);
+
+		expect(res.backend).toBe("cognee");
+		expect(res.stored).toBe(1);
+		expect(getCogneeSessionState(session)?.sessionId).toBe("s-lazy");
 	});
 
 	it("rejects empty content as stored: 0", async () => {
@@ -451,7 +484,10 @@ describe("cogneeBackend.save", () => {
 			agentDir: "/tmp",
 			taskDepth: 0,
 		});
-		const res = await cogneeBackend.save!({ agentDir: "/tmp", cwd: "/tmp", session: session as never }, { content: "   " });
+		const res = await cogneeBackend.save!(
+			{ agentDir: "/tmp", cwd: "/tmp", session: session as never },
+			{ content: "   " },
+		);
 		expect(res.stored).toBe(0);
 		expect(res.message).toBe("Memory content is empty.");
 	});
@@ -471,7 +507,10 @@ describe("cogneeBackend.save", () => {
 		};
 		const spy = vi.spyOn(state, "save").mockResolvedValue({ stored: 1 });
 
-		const res = await cogneeBackend.save!({ agentDir: "/tmp", cwd: "/tmp", session: session as never }, { content: "  note  " });
+		const res = await cogneeBackend.save!(
+			{ agentDir: "/tmp", cwd: "/tmp", session: session as never },
+			{ content: "  note  " },
+		);
 		expect(res.backend).toBe("cognee");
 		expect(res.stored).toBe(1);
 		expect(spy.mock.calls[0]?.[0].content).toBe("note");

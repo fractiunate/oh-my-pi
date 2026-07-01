@@ -3,8 +3,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
-import { computeCogneeScope, deriveCogneeDatasetName } from "../src/cognee/scope";
 import type { CogneeConfig } from "../src/cognee/config";
+import { computeCogneeScope, deriveCogneeDatasetName } from "../src/cognee/scope";
 
 // Isolate `git` invocations in this file from the host's global config —
 // `~/.gitconfig` commit signing or template hooks would otherwise make the
@@ -138,9 +138,7 @@ describe("computeCogneeScope", () => {
 		it("derives names by scoping mode and ignores datasetId", () => {
 			const config = { datasetName: " team ", datasetNamePrefix: " prod ", datasetId: "ignored" };
 
-			expect(deriveCogneeDatasetName(baseConfig({ ...config, scoping: "global" }), "/work/proj")).toBe(
-				"prod-team",
-			);
+			expect(deriveCogneeDatasetName(baseConfig({ ...config, scoping: "global" }), "/work/proj")).toBe("prod-team");
 			expect(deriveCogneeDatasetName(baseConfig({ ...config, scoping: "per-project" }), "/work/proj")).toBe(
 				"prod-team-proj",
 			);
@@ -174,10 +172,9 @@ describe("computeCogneeScope", () => {
 				"team:infra",
 				"app:web",
 			]);
-			expect(computeCogneeScope(baseConfig({ scoping: "per-project", nodeSet }), "/work/proj").retainNodeSet).toEqual([
-				"team:infra",
-				"app:web",
-			]);
+			expect(
+				computeCogneeScope(baseConfig({ scoping: "per-project", nodeSet }), "/work/proj").retainNodeSet,
+			).toEqual(["team:infra", "app:web"]);
 			expect(nodeSet).toEqual(original);
 		});
 
@@ -218,7 +215,10 @@ describe("computeCogneeScope", () => {
 
 		it("does not append a duplicate project node", () => {
 			const scope = computeCogneeScope(
-				baseConfig({ scoping: "per-project-tagged", nodeSet: ["team:infra", " project:cool-app ", "project:cool-app"] }),
+				baseConfig({
+					scoping: "per-project-tagged",
+					nodeSet: ["team:infra", " project:cool-app ", "project:cool-app"],
+				}),
 				"/repo/cool-app",
 			);
 

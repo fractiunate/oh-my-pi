@@ -23,8 +23,19 @@ export class CogneeError extends Error {
 	}
 }
 
+export interface CogneeRememberDataItem {
+	content: string | Blob | Uint8Array;
+	filename?: string;
+	contentType?: string;
+}
+
 export interface CogneeRememberRequest {
-	data: string | Blob | Uint8Array | Array<string | Blob | Uint8Array>;
+	data:
+		| string
+		| Blob
+		| Uint8Array
+		| CogneeRememberDataItem
+		| Array<string | Blob | Uint8Array | CogneeRememberDataItem>;
 	datasetName?: string;
 	datasetId?: string;
 	sessionId?: string;
@@ -187,7 +198,7 @@ interface RequestParsedArgs {
 	path: string;
 	operation: string;
 	query?: Record<string, string | undefined>;
-	body?: BodyInit;
+	body?: RequestInit["body"];
 	json?: Record<string, unknown>;
 	signal?: AbortSignal;
 	allowRecallForbiddenEmptyList?: boolean;
@@ -215,16 +226,7 @@ class CogneeHttpClient implements CogneeClient {
 	async remember(request: CogneeRememberRequest, signal?: AbortSignal): Promise<CogneeRememberResult> {
 		const form = new FormData();
 		for (const value of Array.isArray(request.data) ? request.data : [request.data]) {
-			if (typeof value === "string") {
-				form.append("data", value);
-			} else if (value instanceof Blob) {
-				form.append("data", value);
-			} else {
-				form.append(
-					"data",
-					new Blob([value], { type: request.contentType ?? "application/octet-stream" }),
-				);
-			}
+			appendRememberData(form, value);
 		}
 
 		appendIfDefined(form, "datasetName", request.datasetName);
@@ -249,10 +251,7 @@ class CogneeHttpClient implements CogneeClient {
 		return normalizeRememberResult(parsed);
 	}
 
-	async rememberEntry(
-		request: CogneeRememberEntryRequest,
-		signal?: AbortSignal,
-	): Promise<CogneeRememberResult> {
+	async rememberEntry(request: CogneeRememberEntryRequest, signal?: AbortSignal): Promise<CogneeRememberResult> {
 		if (typeof request.type !== "string" || request.type.trim() === "") {
 			throw new CogneeError("rememberEntry type is required");
 		}
@@ -545,6 +544,48 @@ function summarizeErrorDetails(details: unknown): string {
 	return boundedJson(details);
 }
 
+function isCogneeRememberDataItem(value: unknown): value is CogneeRememberDataItem {
+	return value !== null && typeof value === "object" && "content" in value;
+}
+
+function appendDataBlob(form: FormData, blob: Blob, filename?: string): void {
+	if (filename) {
+		form.append("data", blob, filename);
+		return;
+	}
+	form.append("data", blob);
+}
+
+function appendRememberData(form: FormData, value: string | Blob | Uint8Array | CogneeRememberDataItem): void {
+	if (isCogneeRememberDataItem(value)) {
+		if (typeof value.content === "string") {
+			appendDataBlob(form, new Blob([value.content], { type: value.contentType ?? "text/plain" }), value.filename);
+			return;
+		}
+		if (value.content instanceof Blob) {
+			const blob = value.contentType ? new Blob([value.content], { type: value.contentType }) : value.content;
+			appendDataBlob(form, blob, value.filename);
+			return;
+		}
+		appendDataBlob(
+			form,
+			new Blob([value.content], { type: value.contentType ?? "application/octet-stream" }),
+			value.filename,
+		);
+		return;
+	}
+
+	if (typeof value === "string") {
+		form.append("data", new Blob([value], { type: "text/plain" }));
+		return;
+	}
+	if (value instanceof Blob) {
+		form.append("data", value);
+		return;
+	}
+	form.append("data", new Blob([value], { type: "application/octet-stream" }));
+}
+
 function appendIfDefined(form: FormData, field: string, value: unknown): void {
 	if (value === undefined) return;
 	form.append(field, value instanceof Blob ? value : String(value));
@@ -554,7 +595,6 @@ function appendRepeatedStrings(form: FormData, field: string, values?: string[])
 	if (values === undefined) return;
 	for (const value of values) form.append(field, value);
 }
-
 
 function normalizeRememberResult(raw: unknown): CogneeRememberResult {
 	if (!isRecord(raw)) return { raw };
@@ -572,7 +612,8 @@ function normalizeRememberResult(raw: unknown): CogneeRememberResult {
 	const elapsedSeconds = numberField(raw, "elapsedSeconds", "elapsed_seconds");
 	if (elapsedSeconds !== undefined) result.elapsedSeconds = elapsedSeconds;
 	const sessionIds = arrayField(raw, "sessionIds", "session_ids");
-	if (sessionIds !== undefined) result.sessionIds = sessionIds.filter((item): item is string => typeof item === "string");
+	if (sessionIds !== undefined)
+		result.sessionIds = sessionIds.filter((item): item is string => typeof item === "string");
 	const items = arrayField(raw, "items");
 	if (items !== undefined) result.items = items;
 	const contentHash = stringField(raw, "contentHash", "content_hash");
@@ -599,7 +640,8 @@ function normalizeRecallEntries(raw: unknown): CogneeRecallEntry[] {
 }
 
 function normalizeRecallEntry(item: unknown): CogneeRecallEntry {
-	if (!isRecord(item)) return { source: "unknown", text: typeof item === "string" ? item : boundedJson(item), raw: item };
+	if (!isRecord(item))
+		return { source: "unknown", text: typeof item === "string" ? item : boundedJson(item), raw: item };
 
 	const source = inferRecallSource(item);
 	const base: CogneeRecallEntryBase = {
@@ -607,7 +649,19 @@ function normalizeRecallEntry(item: unknown): CogneeRecallEntry {
 		text: recallText(item),
 		raw: item,
 	};
-	const id = stringField(item, "id", "uuid", "dataId", "data_id", "qaId", "qa_id", "traceId", "trace_id", "nodeId", "node_id");
+	const id = stringField(
+		item,
+		"id",
+		"uuid",
+		"dataId",
+		"data_id",
+		"qaId",
+		"qa_id",
+		"traceId",
+		"trace_id",
+		"nodeId",
+		"node_id",
+	);
 	if (id !== undefined) base.id = id;
 	const score = numberField(item, "score");
 	if (score !== undefined) base.score = score;
@@ -650,12 +704,7 @@ function normalizeRecallEntry(item: unknown): CogneeRecallEntry {
 function inferRecallSource(item: Record<string, unknown>): CogneeRecallSource {
 	const source = stringField(item, "source");
 	if (source !== undefined) return source;
-	if (
-		"question" in item ||
-		"answer" in item ||
-		"qaId" in item ||
-		"qa_id" in item
-	) {
+	if ("question" in item || "answer" in item || "qaId" in item || "qa_id" in item) {
 		return "session";
 	}
 	if ("traceId" in item || "trace_id" in item) return "trace";
@@ -679,7 +728,10 @@ function recallText(item: Record<string, unknown>): string {
 	const question = usableStringField(item, "question");
 	const answer = usableStringField(item, "answer");
 	if (question !== undefined && answer !== undefined) return `Q: ${question}\nA: ${answer}`;
-	return usableStringField(item, "answer", "question", "message", "summary", "nodeName", "node_name", "name", "label") ?? boundedJson(item);
+	return (
+		usableStringField(item, "answer", "question", "message", "summary", "nodeName", "node_name", "name", "label") ??
+		boundedJson(item)
+	);
 }
 
 function normalizeDataset(raw: unknown): CogneeDataset {
@@ -703,8 +755,6 @@ function normalizeDatasets(raw: unknown): CogneeDataset[] {
 	return [];
 }
 
-
 function isAbortError(err: unknown): boolean {
 	return isRecord(err) && err.name === "AbortError";
 }
-

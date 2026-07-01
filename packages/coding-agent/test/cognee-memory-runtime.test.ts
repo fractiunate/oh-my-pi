@@ -22,6 +22,7 @@ import type {
 	MemoryBackend,
 	MemoryBackendOperationContext,
 	MemoryBackendSaveInput,
+	MemoryBackendSaveResult,
 	MemoryBackendSearchOptions,
 	MemoryBackendSearchResult,
 	MemoryBackendStatus,
@@ -70,11 +71,7 @@ function createFakeCogneeBackend(overrides: FakeCogneeOverrides = {}): MemoryBac
 			if (!overrides.status) throw new Error("fake cognee status not configured");
 			return overrides.status(context);
 		},
-		async search(
-			context: MemoryBackendOperationContext,
-			query: string,
-			options?: MemoryBackendSearchOptions,
-		) {
+		async search(context: MemoryBackendOperationContext, query: string, options?: MemoryBackendSearchOptions) {
 			if (!overrides.search) throw new Error("fake cognee search not configured");
 			return overrides.search(context, query, options);
 		},
@@ -136,7 +133,7 @@ describe("createMemoryRuntimeContext — Cognee backend", () => {
 
 	it("returns Cognee status through the backend hook and forwards the original context identity", async () => {
 		const settings = Settings.isolated({ "memory.backend": "cognee" });
-		const session = { settings };
+		const session = { settings } as never;
 		const agentDir = "/tmp/agent";
 		const cwd = "/tmp/project";
 		let captured: MemoryBackendOperationContext | undefined;
@@ -171,7 +168,7 @@ describe("createMemoryRuntimeContext — Cognee backend", () => {
 
 	it("search forwards query and options exactly without trimming or remapping", async () => {
 		const settings = Settings.isolated({ "memory.backend": "cognee" });
-		const session = { settings };
+		const session = { settings } as never;
 		const agentDir = "/tmp/agent";
 		const cwd = "/tmp/project";
 		const ac = new AbortController();
@@ -267,7 +264,11 @@ describe("createMemoryRuntimeContext — Cognee backend", () => {
 		const backend = createFakeCogneeBackend({
 			status: async () => cogneeInactiveStatus(),
 			search: async (_ctx, q) => cogneeEmptySearch(q),
-			save: async () => ({ backend: COGNEE_ID, stored: 0, message: "Cognee backend is not configured/initialised/available." }),
+			save: async () => ({
+				backend: COGNEE_ID,
+				stored: 0,
+				message: "Cognee backend is not configured/initialised/available.",
+			}),
 		});
 		const spy = vi.spyOn(memoryBackend, "resolveMemoryBackend");
 		spy.mockResolvedValue(backend);

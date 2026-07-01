@@ -2,8 +2,8 @@ import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
 import recallDescription from "../prompts/tools/recall.md" with { type: "text" };
-import { resolveMemoryToolOps } from "./memory-ops";
 import type { ToolSession } from ".";
+import { resolveMemoryToolOps } from "./memory-ops";
 
 const memoryRecallSchema = type({
 	query: type("string").describe("natural language search query"),

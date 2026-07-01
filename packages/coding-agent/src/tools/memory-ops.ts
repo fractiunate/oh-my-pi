@@ -41,6 +41,7 @@ interface CogneeToolStateLike {
 
 type ToolSessionWithCognee = ToolSession & {
 	getCogneeSessionState?: () => CogneeToolStateLike | undefined;
+	ensureCogneeSessionState?: () => Promise<CogneeToolStateLike | undefined>;
 };
 
 export function isMemoryToolsBackend(backend: unknown): backend is "hindsight" | "mnemopi" | "cognee" {
@@ -75,9 +76,9 @@ function getMnemopiState(session: ToolSession): MnemopiSessionState {
 	return state;
 }
 
-function getCogneeState(session: ToolSession): CogneeToolStateLike {
+async function getCogneeState(session: ToolSession): Promise<CogneeToolStateLike> {
 	const sessionWithCognee = session as ToolSessionWithCognee;
-	const state = sessionWithCognee.getCogneeSessionState?.();
+	const state = sessionWithCognee.getCogneeSessionState?.() ?? (await sessionWithCognee.ensureCogneeSessionState?.());
 	if (!state) throw new Error("Cognee backend is not initialised for this session.");
 	return state;
 }
@@ -180,10 +181,15 @@ function createMnemopiOps(session: ToolSession): MemoryToolOps {
 				const searchQuery = context?.trim() ? `${query.trim()}\n\nAdditional context:\n${context.trim()}` : query;
 				const results = await state.recallResultsScoped(searchQuery);
 				if (results.length === 0) {
-					return { content: [{ type: "text", text: "No relevant information found to reflect on." }], details: {} };
+					return {
+						content: [{ type: "text", text: "No relevant information found to reflect on." }],
+						details: {},
+					};
 				}
 				return {
-					content: [{ type: "text", text: `Based on recalled memories:\n\n${state.formatContextScoped(results)}` }],
+					content: [
+						{ type: "text", text: `Based on recalled memories:\n\n${state.formatContextScoped(results)}` },
+					],
 					details: {},
 				};
 			} catch (err) {
@@ -220,14 +226,14 @@ function createCogneeOps(session: ToolSession): MemoryToolOps {
 		supportsReflect: true,
 		supportsEdit: false,
 		async retain(items) {
-			const state = getCogneeState(session);
+			const state = await getCogneeState(session);
 			for (const item of items) {
 				state.enqueueRetain(item.content, item.context);
 			}
 			return countResult("memory", items.length, "queued");
 		},
 		async recall(query, options) {
-			const state = getCogneeState(session);
+			const state = await getCogneeState(session);
 			const result = await state.search(query, options);
 			const items = result.items ?? [];
 			const failureMessage = cogneeSearchFailureMessage(result, items.length);
@@ -236,7 +242,7 @@ function createCogneeOps(session: ToolSession): MemoryToolOps {
 			return foundMemories(items.length, formatGenericSearchItems(items));
 		},
 		async reflect(query, context, signal) {
-			const state = getCogneeState(session);
+			const state = await getCogneeState(session);
 			const searchQuery = context?.trim() ? `${query.trim()}\n\nAdditional context:\n${context.trim()}` : query;
 			const result = await state.search(searchQuery, { signal });
 			const items = result.items ?? [];
@@ -251,7 +257,7 @@ function createCogneeOps(session: ToolSession): MemoryToolOps {
 			};
 		},
 		async save(input) {
-			const state = getCogneeState(session);
+			const state = await getCogneeState(session);
 			const result = await state.save(input);
 			if (result.stored > 0) return { content: [{ type: "text", text: "Lesson stored" }], details: {} };
 			if (result.queued === true) {

@@ -2726,7 +2726,6 @@ export const SETTINGS_SCHEMA = {
 	"hindsight.mentalModelRefreshIntervalMs": { type: "number", default: 5 * 60 * 1000 },
 	"hindsight.mentalModelMaxRenderChars": { type: "number", default: 16_000 },
 
-
 	// Cognee graph memory backend.
 	"cognee.apiUrl": {
 		type: "string",
@@ -2867,7 +2866,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "memory",
 			group: "Cognee",
 			label: "Cognee Recall Search Type",
-			description: "Cognee recall search type, for example GRAPH_COMPLETION, RAG_COMPLETION, CHUNKS, INSIGHTS, or CODE",
+			description:
+				"Cognee recall search type, for example GRAPH_COMPLETION, RAG_COMPLETION, CHUNKS, INSIGHTS, or CODE",
 			condition: "cogneeActive",
 		},
 	},
@@ -2878,7 +2878,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "memory",
 			group: "Cognee",
 			label: "Cognee Recall Scope",
-			description: "Cognee recall scope, for example auto, graph, session, trace, graph_context, session_context, or all",
+			description:
+				"Cognee recall scope, for example auto, graph, session, trace, graph_context, session_context, or all",
 			condition: "cogneeActive",
 		},
 	},

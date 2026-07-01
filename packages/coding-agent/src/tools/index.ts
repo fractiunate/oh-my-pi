@@ -4,6 +4,7 @@ import type { FetchImpl, ImageContent, Model, ServiceTierByFamily, ToolChoice } 
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AsyncJobManager } from "../async/job-manager";
 import type { Rule } from "../capability/rule";
+import type { CogneeSessionStateLike } from "../cognee/state";
 import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings } from "../config/settings";
 import { EditTool } from "../edit";
@@ -221,6 +222,10 @@ export interface ToolSession {
 	getHindsightSessionState?: () => HindsightSessionState | undefined;
 	/** Get Mnemopi runtime state for this agent session. */
 	getMnemopiSessionState?: () => MnemopiSessionState | undefined;
+	/** Get Cognee runtime state for this agent session. */
+	getCogneeSessionState?: () => CogneeSessionStateLike | undefined;
+	/** Ensure Cognee runtime state exists for this agent session, then return it. */
+	ensureCogneeSessionState?: () => Promise<CogneeSessionStateLike | undefined>;
 	/** Agent identity used for IRC routing. Returns the registry id (e.g. "Main", "AuthLoader"). */
 	getAgentId?: () => string | null;
 	/** Look up a registered tool by name (used by the eval js backend's tool bridge). */
@@ -579,10 +584,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		// tool whitelist must never be silently widened with write-capable tools.
 		if (session.settings.get("autolearn.enabled") && (session.taskDepth ?? 0) === 0) {
 			if (!requestedTools.includes("manage_skill")) requestedTools.push("manage_skill");
-			if (
-				(isMemoryToolsBackend(memoryBackend) || memoryBackend === "local") &&
-				!requestedTools.includes("learn")
-			) {
+			if ((isMemoryToolsBackend(memoryBackend) || memoryBackend === "local") && !requestedTools.includes("learn")) {
 				requestedTools.push("learn");
 			}
 		}

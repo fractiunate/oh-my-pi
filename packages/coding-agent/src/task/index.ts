@@ -44,6 +44,7 @@ import {
 // Import review tools for side effects (registers subagent tool handlers)
 import "../tools/review";
 import type { AsyncJobManager } from "../async";
+import type { CogneeSessionStateLike } from "../cognee/state";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
@@ -63,7 +64,6 @@ import { mapWithConcurrencyLimit, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "./render";
 import { repairTaskParams } from "./repair-args";
 import { parseIsolationMode } from "./worktree";
-import type { CogneeSessionStateLike } from "../cognee/state";
 
 function renderSubagentUserPrompt(assignment: string): string {
 	return prompt.render(subagentUserPromptTemplate, {
@@ -75,9 +75,7 @@ type CogneeToolSession = {
 	getCogneeSessionState?: () => CogneeSessionStateLike | undefined;
 };
 
-function getPrimaryCogneeSessionState(
-	session: CogneeToolSession,
-): CogneeSessionStateLike | undefined {
+function getPrimaryCogneeSessionState(session: CogneeToolSession): CogneeSessionStateLike | undefined {
 	const state = session.getCogneeSessionState?.();
 	return state?.aliasOf ?? state;
 }

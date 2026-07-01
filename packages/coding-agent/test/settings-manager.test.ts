@@ -9,8 +9,8 @@ import type { Context } from "@oh-my-pi/pi-ai/types";
 import {
 	getDefault,
 	getEnumValues,
-	onCogneeScopeChanged,
 	onAppendOnlyModeChanged,
+	onCogneeScopeChanged,
 	onStatusLineSessionAccentChanged,
 	resetSettingsForTest,
 	type SettingPath,

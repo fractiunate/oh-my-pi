@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
 	composeCogneeRecallQuery,
 	flattenMessagesForCognee,
+	formatCogneeDocumentFilename,
 	formatCogneeRecallBlock,
 	formatCogneeSearchItem,
 	prepareCogneeRetentionDocument,
@@ -233,12 +234,7 @@ describe("Cognee memory-tag stripping", () => {
 
 describe("composeCogneeRecallQuery", () => {
 	it("returns latest prompt with no prior context when contextTurns is one", () => {
-		const query = composeCogneeRecallQuery(
-			"latest prompt",
-			[{ role: "user", content: "older" }],
-			1,
-			globalScope,
-		);
+		const query = composeCogneeRecallQuery("latest prompt", [{ role: "user", content: "older" }], 1, globalScope);
 
 		expect(query).toBe("Scope: global:omp\n\nLatest prompt:\nlatest prompt");
 		expect(query).not.toContain("Prior context:");
@@ -392,12 +388,11 @@ describe("prepareCogneeRetentionDocument", () => {
 		expect(document).toEqual({
 			content:
 				"Session: session-1\nRetained at: 2026-06-30T12:00:00.000Z\nScope: project:oh-my-pi\nProject: oh-my-pi\n\n[role: user]\nhello\n[user:end]\n\n[role: assistant]\nworld\n[assistant:end]",
-			documentId: "session-1",
-			contentType: "text/markdown",
+			filename: "2026-06-30T12-00-00-000Z-oh-my-pi.txt",
 		});
 	});
 
-	it("uses retain window turns and timestamped document ID for last-turn retention", () => {
+	it("uses retain window turns and datetime-folder filename for last-turn retention", () => {
 		const retainedAt = new Date("2026-06-30T12:00:00.000Z");
 		const document = prepareCogneeRetentionDocument({
 			messages: [
@@ -416,7 +411,7 @@ describe("prepareCogneeRetentionDocument", () => {
 			scope,
 		});
 
-		expect(document?.documentId).toBe(`session-1-${retainedAt.getTime()}`);
+		expect(document?.filename).toBe(formatCogneeDocumentFilename(retainedAt, "oh-my-pi"));
 		expect(document?.content).not.toContain("old user");
 		expect(document?.content).toContain("middle user");
 		expect(document?.content).toContain("new assistant");
@@ -495,7 +490,11 @@ describe("formatCogneeRecallBlock", () => {
 	});
 
 	it("uses the actual current time when no test clock is supplied", () => {
-		const block = formatCogneeRecallBlock([asEntry({ source: "session", id: "entry-1", text: "remember this", raw: {} })], config, scope);
+		const block = formatCogneeRecallBlock(
+			[asEntry({ source: "session", id: "entry-1", text: "remember this", raw: {} })],
+			config,
+			scope,
+		);
 
 		expect(block).not.toContain("Current time: 1970-01-01T00:00:00.000Z");
 	});
@@ -504,7 +503,15 @@ describe("formatCogneeRecallBlock", () => {
 		const customConfig = { ...config, recallPromptPreamble: "Use these sparingly." } as TestConfig;
 		const block = formatCogneeRecallBlock(
 			[
-				asEntry({ source: "session", qaId: "qa-1", text: "", question: "Question?", answer: "Answer.", score: 0.98765, raw: {} }),
+				asEntry({
+					source: "session",
+					qaId: "qa-1",
+					text: "",
+					question: "Question?",
+					answer: "Answer.",
+					score: 0.98765,
+					raw: {},
+				}),
 				asEntry({ source: "trace", traceId: "trace-1", text: "trace text", raw: {} }),
 				asEntry({ source: "graph_context", text: "", context: "graph context", raw: {} }),
 				asEntry({ source: "session_context", text: "", context: "session context", raw: {} }),
@@ -546,7 +553,12 @@ describe("formatCogneeRecallBlock", () => {
 		const block = formatCogneeRecallBlock(
 			[
 				asEntry({ source: "session", id: "first", text: "first memory stays", raw: {} }),
-				asEntry({ source: "session", id: "second", text: "second memory has a very long body that must be truncated before the closing tag", raw: {} }),
+				asEntry({
+					source: "session",
+					id: "second",
+					text: "second memory has a very long body that must be truncated before the closing tag",
+					raw: {},
+				}),
 			],
 			tinyConfig,
 			scope,
@@ -563,7 +575,14 @@ describe("formatCogneeRecallBlock", () => {
 describe("formatCogneeSearchItem", () => {
 	it("maps direct IDs and generic fields without raw", () => {
 		const item = formatCogneeSearchItem(
-			asEntry({ source: "session", id: "entry-1", text: "content", time: "2026-06-30T00:00:00.000Z", score: 0.5, raw: { hidden: true } }),
+			asEntry({
+				source: "session",
+				id: "entry-1",
+				text: "content",
+				time: "2026-06-30T00:00:00.000Z",
+				score: 0.5,
+				raw: { hidden: true },
+			}),
 		);
 
 		expect(item).toEqual({
@@ -577,16 +596,25 @@ describe("formatCogneeSearchItem", () => {
 	});
 
 	it("maps source-specific fallback IDs and empty-content fallback", () => {
-		expect(formatCogneeSearchItem(asEntry({ source: "session", qaId: "qa-1", text: "question", raw: {} })).id).toBe("qa-1");
-		expect(formatCogneeSearchItem(asEntry({ source: "trace", traceId: "trace-1", text: "trace", raw: {} })).id).toBe("trace-1");
-		expect(formatCogneeSearchItem(asEntry({ source: "graph", nodeName: "NodeA", text: "graph", raw: {} })).id).toBe("NodeA");
-		expect(formatCogneeSearchItem(asEntry({ source: "unknown", text: "...", raw: {} })).content).toBe("[empty Cognee recall entry]");
+		expect(formatCogneeSearchItem(asEntry({ source: "session", qaId: "qa-1", text: "question", raw: {} })).id).toBe(
+			"qa-1",
+		);
+		expect(formatCogneeSearchItem(asEntry({ source: "trace", traceId: "trace-1", text: "trace", raw: {} })).id).toBe(
+			"trace-1",
+		);
+		expect(formatCogneeSearchItem(asEntry({ source: "graph", nodeName: "NodeA", text: "graph", raw: {} })).id).toBe(
+			"NodeA",
+		);
+		expect(formatCogneeSearchItem(asEntry({ source: "unknown", text: "...", raw: {} })).content).toBe(
+			"[empty Cognee recall entry]",
+		);
 	});
 
 	it("does not count Q/A labels as substantive search content", () => {
-		expect(formatCogneeSearchItem(asEntry({ source: "session", text: "", question: "...", answer: "?!", raw: {} })).content).toBe(
-			"[empty Cognee recall entry]",
-		);
+		expect(
+			formatCogneeSearchItem(asEntry({ source: "session", text: "", question: "...", answer: "?!", raw: {} }))
+				.content,
+		).toBe("[empty Cognee recall entry]");
 	});
 });
 

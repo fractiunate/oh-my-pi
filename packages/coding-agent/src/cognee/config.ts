@@ -12,13 +12,7 @@ import type { Settings } from "../config/settings";
 
 export type CogneeScoping = "global" | "per-project" | "per-project-tagged";
 export type CogneeRetainMode = "full-session" | "last-turn";
-export type CogneeSearchType =
-	| "GRAPH_COMPLETION"
-	| "RAG_COMPLETION"
-	| "CHUNKS"
-	| "INSIGHTS"
-	| "CODE"
-	| string;
+export type CogneeSearchType = "GRAPH_COMPLETION" | "RAG_COMPLETION" | "CHUNKS" | "INSIGHTS" | "CODE" | string;
 export type CogneeRecallScope =
 	| "auto"
 	| "graph"
@@ -149,7 +143,6 @@ function positiveNullableInteger(value: unknown): number | null {
 	if (n === undefined || !Number.isFinite(n) || !Number.isInteger(n) || n <= 0) return null;
 	return n;
 }
-
 
 function pickScoping(value: unknown): CogneeScoping | undefined {
 	return typeof value === "string" && (VALID_SCOPINGS as string[]).includes(value)

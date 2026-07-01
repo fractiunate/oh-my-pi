@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import { logger } from "@oh-my-pi/pi-utils";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { isCogneeConfigured, loadCogneeConfig } from "@oh-my-pi/pi-coding-agent/cognee/config";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { logger } from "@oh-my-pi/pi-utils";
 
 const DEFAULT_RECALL_PREAMBLE =
 	"Relevant Cognee memories from prior conversations and knowledge graph context. " +

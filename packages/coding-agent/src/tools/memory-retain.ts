@@ -1,8 +1,8 @@
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { type } from "arktype";
 import retainDescription from "../prompts/tools/retain.md" with { type: "text" };
-import { resolveMemoryToolOps } from "./memory-ops";
 import type { ToolSession } from ".";
+import { resolveMemoryToolOps } from "./memory-ops";
 
 const memoryRetainSchema = type({
 	items: type({

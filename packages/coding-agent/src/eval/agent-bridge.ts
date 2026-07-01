@@ -6,8 +6,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
-import { resolveAgentModelPatterns } from "../config/model-resolver";
 import type { CogneeSessionStateLike } from "../cognee/state";
+import { resolveAgentModelPatterns } from "../config/model-resolver";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
 import { MCPManager } from "../mcp/manager";
@@ -192,9 +192,7 @@ type CogneeEvalToolSession = {
 	getCogneeSessionState?: () => CogneeSessionStateLike | undefined;
 };
 
-function getPrimaryCogneeSessionState(
-	session: CogneeEvalToolSession,
-): CogneeSessionStateLike | undefined {
+function getPrimaryCogneeSessionState(session: CogneeEvalToolSession): CogneeSessionStateLike | undefined {
 	const state = session.getCogneeSessionState?.();
 	return state?.aliasOf ?? state;
 }

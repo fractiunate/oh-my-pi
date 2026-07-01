@@ -16,26 +16,22 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Agent } from "@oh-my-pi/pi-agent-core";
 import { AuthStorage } from "@oh-my-pi/pi-ai";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as memoryBackend from "@oh-my-pi/pi-coding-agent/memory-backend";
 import type { MemoryBackend, MemoryBackendStartOptions } from "@oh-my-pi/pi-coding-agent/memory-backend/types";
-import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { removeSyncWithRetries, Snowflake, TempDir } from "@oh-my-pi/pi-utils";
-import {
-	getCogneeSessionState,
-	setCogneeSessionState,
-	type CogneeSessionStateLike,
-} from "../src/cognee/state";
+import { type CogneeSessionStateLike, setCogneeSessionState } from "../src/cognee/state";
 
 // --- Fake Cognee session state ------------------------------------------------
 
@@ -50,7 +46,7 @@ interface FakeCogneeState extends CogneeSessionStateLike {
 function createFakeCogneeState(
 	overrides: { aliasOf?: CogneeSessionStateLike; sessionId?: string } = {},
 ): FakeCogneeState {
-	const state: FakeCogneeState = {
+	const state = {
 		sessionId: overrides.sessionId ?? "sess-initial",
 		aliasOf: overrides.aliasOf,
 		lastRetainedTurn: 0,
@@ -60,25 +56,25 @@ function createFakeCogneeState(
 		flushCalls: 0,
 		disposeCalls: 0,
 		events: [],
-		setSessionId(sid: string) {
+		setSessionId(this: FakeCogneeState, sid: string) {
 			this.setSessionIdCalls.push(sid);
 		},
-		resetConversationTracking() {
+		resetConversationTracking(this: FakeCogneeState) {
 			this.resetCalls += 1;
 		},
 		enqueueRetain() {},
-		async flushRetainQueue() {
+		async flushRetainQueue(this: FakeCogneeState) {
 			this.flushCalls += 1;
 			this.events.push("flush");
 		},
 		async beforeAgentStartPrompt(): Promise<string | undefined> {
 			return undefined;
 		},
-		async dispose() {
+		async dispose(this: FakeCogneeState) {
 			this.disposeCalls += 1;
 			this.events.push("dispose");
 		},
-	};
+	} as unknown as FakeCogneeState;
 	return state;
 }
 
@@ -106,10 +102,7 @@ async function createHarness(backend: string = "off"): Promise<Harness> {
 	const tempDir = TempDir.createSync("@pi-cognee-session-propagation-");
 	const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
 	const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
-	const sessionManager = SessionManager.create(
-		tempDir.path(),
-		path.join(tempDir.path(), "sessions"),
-	);
+	const sessionManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
 	const agent = new Agent({
 		initialState: { systemPrompt: ["Test"], tools: [], messages: [] },
 	});
@@ -225,7 +218,9 @@ describe("CogneeSessionPropagation: SDK startup forwarding", () => {
 		const modelRegistry = new ModelRegistry(authStorage);
 
 		const fakePrimary = createFakeCogneeState({ sessionId: "parent-primary" });
-		let capturedStart: (MemoryBackendStartOptions & { parentCogneeSessionState?: CogneeSessionStateLike }) | undefined;
+		let capturedStart:
+			| (MemoryBackendStartOptions & { parentCogneeSessionState?: CogneeSessionStateLike })
+			| undefined;
 		const fakeBackend: MemoryBackend = {
 			id: "cognee",
 			async start(options) {
@@ -322,8 +317,7 @@ describe("CogneeSessionPropagation: task executor forwarding", () => {
 		const fakePrimary = createFakeCogneeState({ sessionId: "parent-primary" });
 		let capturedParent: CogneeSessionStateLike | undefined;
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
-			capturedParent = (options as { parentCogneeSessionState?: CogneeSessionStateLike })
-				.parentCogneeSessionState;
+			capturedParent = (options as { parentCogneeSessionState?: CogneeSessionStateLike }).parentCogneeSessionState;
 			return {
 				session: yieldingSubagentSession(),
 				extensionsResult: {},

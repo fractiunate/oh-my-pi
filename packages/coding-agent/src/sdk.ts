@@ -46,6 +46,7 @@ import { buildServiceTierByFamily } from "./config/service-tier";
 import { Settings, type SkillsSettings } from "./config/settings";
 import { CursorExecHandlers } from "./cursor";
 import "./discovery";
+import type { CogneeSessionStateLike } from "./cognee/state";
 import { initializeWithSettings } from "./discovery";
 import { disposeAllJuliaKernelSessions, disposeJuliaKernelSessionsByOwner } from "./eval/jl/executor";
 import { disposeAllKernelSessions, disposeKernelSessionsByOwner } from "./eval/py/executor";
@@ -93,7 +94,6 @@ import {
 import { MCP_CONNECTION_STATUS_EVENT_CHANNEL, type McpConnectionStatusEvent } from "./mcp/startup-events";
 import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memory-backend";
 import type { MnemopiSessionState } from "./mnemopi/state";
-import type { CogneeSessionStateLike } from "./cognee/state";
 import asyncResultTemplate from "./prompts/tools/async-result.md" with { type: "text" };
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
@@ -1505,6 +1505,25 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// entries capture it at fetch time and are dropped at injection if a newer
 		// mutation (any tool) bumped it in the meantime.
 		const fileMutationVersions = new Map<string, number>();
+		let memoryStartupPromise: Promise<void> | undefined;
+		const startMemoryBackend = async () => {
+			const memoryBackend = await resolveMemoryBackend(settings);
+			await memoryBackend.start({
+				session,
+				settings,
+				modelRegistry,
+				agentDir,
+				taskDepth,
+				parentHindsightSessionState: options.parentHindsightSessionState,
+				parentMnemopiSessionState: options.parentMnemopiSessionState,
+				parentCogneeSessionState: options.parentCogneeSessionState,
+			});
+		};
+		const ensureMemoryBackendStarted = (): Promise<void> => {
+			memoryStartupPromise ??= logger.time("startMemoryStartupTask", startMemoryBackend);
+			return memoryStartupPromise;
+		};
+
 		const toolSession: ToolSession = {
 			get cwd() {
 				return sessionManager.getCwd();
@@ -1534,6 +1553,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getSessionId: () => sessionManager.getSessionId?.() ?? null,
 			getHindsightSessionState: () => session?.getHindsightSessionState(),
 			getMnemopiSessionState: () => session?.getMnemopiSessionState(),
+			getCogneeSessionState: () => session?.getCogneeSessionState(),
+			ensureCogneeSessionState: async () => {
+				if (settings.get("memory.backend") !== "cognee") return undefined;
+				await ensureMemoryBackendStarted();
+				return session?.getCogneeSessionState();
+			},
 			getAgentId: () => resolvedAgentId,
 			getToolByName: name => session?.getToolByName(name),
 			agentRegistry,
@@ -2876,20 +2901,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			}
 		}
 
-		const startMemoryBackend = async () => {
-			const memoryBackend = await resolveMemoryBackend(settings);
-			await memoryBackend.start({
-				session,
-				settings,
-				modelRegistry,
-				agentDir,
-				taskDepth,
-				parentHindsightSessionState: options.parentHindsightSessionState,
-				parentMnemopiSessionState: options.parentMnemopiSessionState,
-				parentCogneeSessionState: options.parentCogneeSessionState,
-			});
-		};
-
 		// Auto-learn can immediately trigger a synthetic capture turn after the
 		// first real stop. When a memory backend is selected, install that backend's
 		// per-session state first so the capture turn's `learn` tool observes the
@@ -2905,10 +2916,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// mid-session DISABLE. The subscription lives for the session's lifetime; the
 		// reference is intentionally discarded (the listener retains it).
 		if (settings.get("autolearn.enabled") && taskDepth === 0) {
-			await logger.time("startMemoryStartupTask", startMemoryBackend);
+			await ensureMemoryBackendStarted();
 			new AutoLearnController({ session, settings });
 		} else {
-			void logger.time("startMemoryStartupTask", startMemoryBackend);
+			void ensureMemoryBackendStarted();
 		}
 
 		// Wire MCP manager callbacks to session for reactive tool updates.

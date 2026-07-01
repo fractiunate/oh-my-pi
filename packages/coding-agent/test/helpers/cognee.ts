@@ -13,7 +13,6 @@
  * `cognee/scope`, `memory-backend`) are imported as types directly.
  */
 
-import { asGlobalFetch } from "./fetch-mock";
 import type {
 	CogneeClient,
 	CogneeCreateDatasetRequest,
@@ -28,13 +27,14 @@ import type {
 	CogneeRememberRequest,
 	CogneeRememberResult,
 } from "@oh-my-pi/pi-coding-agent/cognee/client";
+import type { CogneeScope } from "@oh-my-pi/pi-coding-agent/cognee/scope";
 import type {
 	MemoryBackendSaveInput,
 	MemoryBackendSaveResult,
 	MemoryBackendSearchOptions,
 	MemoryBackendSearchResult,
 } from "@oh-my-pi/pi-coding-agent/memory-backend";
-import type { CogneeScope } from "@oh-my-pi/pi-coding-agent/cognee/scope";
+import { asGlobalFetch } from "./fetch-mock";
 
 // --- Structural stand-ins for absent Wave 2 sibling types -------------------
 
@@ -118,9 +118,7 @@ export type RecordedCogneeBody =
 	| { kind: "raw"; value: unknown }
 	| null;
 
-export type RecordedCogneeFormValue =
-	| string
-	| { kind: "blob"; type: string; size: number; text?: string };
+export type RecordedCogneeFormValue = string | { kind: "blob"; type: string; size: number; text?: string };
 
 // --- Fake fetch -------------------------------------------------------------
 
@@ -128,7 +126,7 @@ export interface FakeCogneeFetchResponse {
 	status?: number;
 	body?: unknown;
 	text?: string;
-	headers?: HeadersInit;
+	headers?: ConstructorParameters<typeof Headers>[0];
 }
 
 export function createFakeCogneeFetch(responses: FakeCogneeFetchResponse[]): {
@@ -140,9 +138,7 @@ export function createFakeCogneeFetch(responses: FakeCogneeFetchResponse[]): {
 	const fetchImpl = asGlobalFetch(async (input, init) => {
 		const requestUrl = toUrl(input);
 		const path = requestUrl.pathname + requestUrl.search;
-		const method = (
-			init?.method ?? (input instanceof Request ? input.method : undefined) ?? "GET"
-		).toUpperCase();
+		const method = (init?.method ?? (input instanceof Request ? input.method : undefined) ?? "GET").toUpperCase();
 		const headers = normalizeHeaders(input, init?.headers);
 		const signal = init?.signal ?? (input instanceof Request ? input.signal : null);
 		const body = await snapshotBody(input, init?.body);
@@ -154,7 +150,7 @@ export function createFakeCogneeFetch(responses: FakeCogneeFetchResponse[]): {
 		}
 		const status = response.status ?? 200;
 		if (response.text !== undefined) {
-			return new Response(response.text, { status, headers: response.headers });
+			return new Response(response.text, { status, headers: new Headers(response.headers) });
 		}
 		const headersOut = new Headers(response.headers);
 		if (!headersOut.has("content-type")) {
@@ -171,7 +167,10 @@ function toUrl(input: string | URL | Request): URL {
 	return new URL(input);
 }
 
-function normalizeHeaders(input: string | URL | Request, initHeaders: HeadersInit | undefined): Record<string, string> {
+function normalizeHeaders(
+	input: string | URL | Request,
+	initHeaders: ConstructorParameters<typeof Headers>[0] | undefined,
+): Record<string, string> {
 	const merged = new Headers();
 	if (input instanceof Request) {
 		for (const [key, value] of input.headers) {
@@ -191,7 +190,10 @@ function normalizeHeaders(input: string | URL | Request, initHeaders: HeadersIni
 	return out;
 }
 
-async function snapshotBody(input: string | URL | Request, body: BodyInit | null | undefined): Promise<RecordedCogneeBody> {
+async function snapshotBody(
+	input: string | URL | Request,
+	body: NonNullable<ConstructorParameters<typeof Request>[1]>["body"] | null | undefined,
+): Promise<RecordedCogneeBody> {
 	if (body === undefined && input instanceof Request) {
 		const clone = input.clone();
 		const contentType = (clone.headers.get("content-type") ?? "").toLowerCase();
@@ -233,10 +235,13 @@ function parseTextBody(text: string): RecordedCogneeBody {
 	return parsed.ok ? { kind: "json", value: parsed.value } : { kind: "text", value: text };
 }
 
-async function snapshotFormData(form: FormData): Promise<Record<string, RecordedCogneeFormValue[]>> {
+async function snapshotFormData(form: {
+	entries(): IterableIterator<[string, string | Blob]>;
+}): Promise<Record<string, RecordedCogneeFormValue[]>> {
 	const fields: Record<string, RecordedCogneeFormValue[]> = {};
 	for (const [key, value] of form.entries()) {
-		const list = fields[key] ?? (fields[key] = []);
+		const list = fields[key] ?? [];
+		fields[key] = list;
 		if (typeof value === "string") {
 			list.push(value);
 			continue;
@@ -412,9 +417,9 @@ const DEFAULT_SCOPE: CogneeScope = {
 export function createFakeCogneeScope(overrides?: Partial<CogneeScope>): CogneeScope {
 	const base: CogneeScope = {
 		...DEFAULT_SCOPE,
-		recallDatasetLabels: [...DEFAULT_SCOPE.recallDatasetLabels],
-		recallDatasets: [...DEFAULT_SCOPE.recallDatasets],
-		retainNodeSet: [...DEFAULT_SCOPE.retainNodeSet],
+		recallDatasetLabels: [...(DEFAULT_SCOPE.recallDatasetLabels ?? [])],
+		recallDatasets: [...(DEFAULT_SCOPE.recallDatasets ?? [])],
+		retainNodeSet: [...(DEFAULT_SCOPE.retainNodeSet ?? [])],
 	};
 	if (!overrides) return base;
 	const merged: CogneeScope = { ...base, ...overrides };

@@ -976,10 +976,7 @@ describe("ExtensionRunner", () => {
 		});
 
 		it("exposes a Cognee-shaped memory runtime through the generic ctx.memory API", async () => {
-			// Plan-authorized local widening: `MemoryBackendId` does not yet include
-			// `"cognee"` in this worktree (owned by CogneeBackendAdapter). This const
-			// stands in for that future union member; no production type is altered.
-			const COGNEE = "cognee" as never;
+			const COGNEE = "cognee";
 			const extCode = `
 				export default function(pi) {
 					pi.on("session_start", async (_event, ctx) => {
@@ -993,7 +990,7 @@ describe("ExtensionRunner", () => {
 			`;
 			const explicitExtensionPath = path.join(tempDir.path(), "memory-context-cognee.ts");
 			fs.writeFileSync(explicitExtensionPath, extCode);
-			const globalState = globalThis as typeof globalThis & {
+			const globalState = globalThis as {
 				__ompCogneeMemory?: { status: unknown; search: unknown; save: unknown };
 			};
 			delete globalState.__ompCogneeMemory;
@@ -1054,21 +1051,22 @@ describe("ExtensionRunner", () => {
 
 			await runner.emit({ type: "session_start" });
 
-			const observed = globalState.__ompCogneeMemory;
-			expect(observed).toBeDefined();
-			expect(observed?.status).toMatchObject({
+			const observed = (globalThis as { __ompCogneeMemory?: { status: unknown; search: unknown; save: unknown } })
+				.__ompCogneeMemory;
+			if (!observed) throw new Error("expected Cognee memory runtime result");
+			expect(observed.status).toMatchObject({
 				backend: "cognee",
 				active: true,
 				writable: true,
 				searchable: true,
 				scope: "project:oh-my-pi",
 			});
-			expect(observed?.search).toMatchObject({
+			expect(observed.search).toMatchObject({
 				backend: "cognee",
 				query: "needle",
 				count: 1,
 			});
-			expect(observed?.save).toMatchObject({ backend: "cognee", stored: 1 });
+			expect(observed.save).toMatchObject({ backend: "cognee", stored: 1 });
 			delete globalState.__ompCogneeMemory;
 		});
 	});

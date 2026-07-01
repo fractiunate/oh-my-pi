@@ -1,23 +1,25 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type {
-	CogneeClient,
-	CogneeImproveRequest,
-	CogneeRecallEntry,
-	CogneeRecallRequest,
-	CogneeRememberRequest,
-	CogneeRememberResult,
+import {
+	type CogneeClient,
+	CogneeError,
+	type CogneeImproveRequest,
+	type CogneeRecallEntry,
+	type CogneeRecallRequest,
+	type CogneeRememberDataItem,
+	type CogneeRememberRequest,
+	type CogneeRememberResult,
 } from "../src/cognee/client";
 import type { CogneeConfig } from "../src/cognee/config";
 import type { CogneeScope } from "../src/cognee/scope";
-import type { AgentSession } from "../src/session/agent-session";
-import type { MemoryBackendSaveInput } from "../src/memory-backend";
 import {
 	CogneeSessionState,
+	type CogneeSessionStateOptions,
 	getCogneeSessionState,
 	setCogneeSessionState,
-	type CogneeSessionStateOptions,
 } from "../src/cognee/state";
+import type { MemoryBackendSaveInput } from "../src/memory-backend";
+import type { AgentSession } from "../src/session/agent-session";
 
 type TestConfig = CogneeConfig;
 type TestScope = CogneeScope;
@@ -40,7 +42,13 @@ interface FakeClient extends CogneeClient {
 
 interface FakeSession {
 	sessionManager: {
-		getEntries(): Array<{ type: string; message: AgentMessage; id: string; parentId: string | null; timestamp: string }>;
+		getEntries(): Array<{
+			type: string;
+			message: AgentMessage;
+			id: string;
+			parentId: string | null;
+			timestamp: string;
+		}>;
 		getCwd(): string;
 	};
 	subscribeListeners: ((event: { type: string; messages?: AgentMessage[] }) => void)[];
@@ -210,8 +218,15 @@ function assistantMessage(content: string): AgentMessage {
 }
 
 function makeOptions(
-	overrides: Partial<CogneeSessionStateOptions> & { session?: FakeSession } = {},
-): { options: CogneeSessionStateOptions; session: FakeSession; client: FakeClient } {
+	overrides: Partial<Omit<CogneeSessionStateOptions, "client" | "session">> & {
+		client?: FakeClient;
+		session?: FakeSession;
+	} = {},
+): {
+	options: CogneeSessionStateOptions;
+	session: FakeSession;
+	client: FakeClient;
+} {
 	const session = overrides.session ?? makeSession();
 	const client = overrides.client ?? makeClient();
 	const config = overrides.config ?? makeConfig();
@@ -231,6 +246,22 @@ function makeOptions(
 
 function recallEntry(text: string, overrides: Partial<CogneeRecallEntry> = {}): CogneeRecallEntry {
 	return { source: "graph", text, ...overrides } as CogneeRecallEntry;
+}
+
+function isRememberDataItem(value: unknown): value is CogneeRememberDataItem {
+	return value !== null && typeof value === "object" && "content" in value;
+}
+
+function rememberDataContent(value: CogneeRememberRequest["data"]): string {
+	const first = Array.isArray(value) ? value[0] : value;
+	if (isRememberDataItem(first)) return typeof first.content === "string" ? first.content : String(first.content);
+	return typeof first === "string" ? first : String(first);
+}
+
+function recallPrerequisitesError(): CogneeError {
+	return new CogneeError("HTTP 404: Recall prerequisites not met", 404, {
+		detail: "Recall prerequisites not met",
+	});
 }
 
 afterEach(() => {
@@ -266,7 +297,7 @@ describe("CogneeSessionState side-channel accessors", () => {
 
 describe("CogneeSessionState first-turn recall", () => {
 	it("beforeAgentStartPrompt sends expected recall fields, returns a block, sets snippet and flag", async () => {
-		const { options, session, client } = makeOptions();
+		const { options, client } = makeOptions();
 		client.recallEntries = [recallEntry("Prior note about alpha.")];
 		const state = new CogneeSessionState(options);
 		const result = await state.beforeAgentStartPrompt("latest task");
@@ -314,6 +345,26 @@ describe("CogneeSessionState first-turn recall", () => {
 		expect(result).toBeUndefined();
 		expect(state.hasRecalledForFirstTurn).toBe(false);
 		expect(state.lastRecallSnippet).toBeUndefined();
+	});
+
+	it("recovers recall prerequisites before first-turn prompt injection", async () => {
+		const { options, client } = makeOptions();
+		client.recallEntries = [recallEntry("Prior recovered note.")];
+		let recallAttempts = 0;
+		client.recall = async function (request, signal) {
+			this.recallCalls.push({ request, signal });
+			recallAttempts += 1;
+			if (recallAttempts === 1) throw recallPrerequisitesError();
+			return this.recallEntries;
+		};
+		const state = new CogneeSessionState(options);
+
+		const result = await state.beforeAgentStartPrompt("latest task");
+
+		expect(result).toContain("Prior recovered note.");
+		expect(client.improveCalls).toHaveLength(1);
+		expect(client.recallCalls).toHaveLength(2);
+		expect(state.hasRecalledForFirstTurn).toBe(true);
 	});
 
 	it("a second call does not call client.recall again", async () => {
@@ -379,6 +430,8 @@ describe("CogneeSessionState listener recall and prompt snippets", () => {
 		// Await any scheduled async listener work.
 		await Promise.resolve();
 		await Promise.resolve();
+		await Promise.resolve();
+		await Promise.resolve();
 		expect(state.hasRecalledForFirstTurn).toBe(true);
 		expect(state.lastRecallSnippet).toContain("<cognee_memories>");
 		expect(session.refreshCount).toBe(1);
@@ -391,6 +444,8 @@ describe("CogneeSessionState listener recall and prompt snippets", () => {
 		const state = new CogneeSessionState(options);
 		state.attachSessionListeners();
 		session.emit({ type: "agent_start" });
+		await Promise.resolve();
+		await Promise.resolve();
 		await Promise.resolve();
 		await Promise.resolve();
 		expect(state.hasRecalledForFirstTurn).toBe(true);
@@ -424,7 +479,7 @@ describe("CogneeSessionState auto-retain", () => {
 		expect(state.lastRetainedTurn).toBe(0);
 	});
 
-	it("at threshold remember receives dataset fields, nodeSet, retain options, contentType, and transcript content", async () => {
+	it("at threshold remember omits contentType and sends dataset fields, nodeSet, retain options, and transcript content", async () => {
 		const messages: AgentMessage[] = [
 			userMessage("turn 1"),
 			assistantMessage("answer 1"),
@@ -447,9 +502,9 @@ describe("CogneeSessionState auto-retain", () => {
 		expect(req.datasetId).toBeUndefined();
 		expect(req.nodeSet).toEqual(["project:oh-my-pi"]);
 		expect(req.runInBackground).toBe(true);
-		expect(req.contentType).toBe("text/markdown");
+		expect(req.contentType).toBeUndefined();
 		expect(req.sessionId).toBe("session-1");
-		const data = typeof req.data === "string" ? req.data : String((req.data as unknown[])[0]);
+		const data = rememberDataContent(req.data);
 		expect(data).toContain("Session: session-1");
 		expect(data).toContain("Scope: project:oh-my-pi");
 		expect(data).toContain("Project: oh-my-pi");
@@ -480,8 +535,7 @@ describe("CogneeSessionState auto-retain", () => {
 		await Promise.resolve();
 		await Promise.resolve();
 		expect(client.rememberCalls).toHaveLength(1);
-		const rawData = client.rememberCalls[0].request.data;
-		const data = typeof rawData === "string" ? rawData : String((rawData as unknown[])[0]);
+		const data = rememberDataContent(client.rememberCalls[0].request.data);
 		// last-turn mode slices to retainEveryNTurns + retainOverlapTurns = 5 user turns,
 		// which covers all 3 user turns here; assert the window marker is present.
 		expect(data).toContain("[role: user]");
@@ -563,11 +617,11 @@ describe("CogneeSessionState retain queue", () => {
 		expect(Array.isArray(req.data)).toBe(true);
 		const docs = req.data as unknown[];
 		expect(docs).toHaveLength(2);
-		expect(String(docs[0])).toContain("first memory");
-		expect(String(docs[0])).toContain("Context: custom-ctx");
-		expect(String(docs[0])).toContain("Source: explicit-retain");
-		expect(String(docs[1])).toContain("second memory");
-		expect(String(docs[1])).toContain("Context: omp");
+		expect(rememberDataContent(docs[0] as CogneeRememberRequest["data"])).toContain("first memory");
+		expect(rememberDataContent(docs[0] as CogneeRememberRequest["data"])).toContain("Context: custom-ctx");
+		expect(rememberDataContent(docs[0] as CogneeRememberRequest["data"])).toContain("Source: explicit-retain");
+		expect(rememberDataContent(docs[1] as CogneeRememberRequest["data"])).toContain("second memory");
+		expect(rememberDataContent(docs[1] as CogneeRememberRequest["data"])).toContain("Context: omp");
 	});
 
 	it("queue flush swallows client errors and emits a warning notice", async () => {
@@ -577,7 +631,9 @@ describe("CogneeSessionState retain queue", () => {
 		setCogneeSessionState(asSession(session), state);
 		state.enqueueRetain("a memory");
 		await state.flushRetainQueue();
-		expect(session.notices.some(n => n.level === "warning" && n.source === "Cognee" && n.message.includes("1 memory"))).toBe(true);
+		expect(
+			session.notices.some(n => n.level === "warning" && n.source === "Cognee" && n.message.includes("1 memory")),
+		).toBe(true);
 	});
 
 	it("queue flush does not reject flushRetainQueue for client errors", async () => {
@@ -653,6 +709,61 @@ describe("CogneeSessionState search and save", () => {
 		expect(result.message).toContain("Cognee recall failed");
 	});
 
+	it("recovers recall prerequisites by improving once and retrying", async () => {
+		const { options, client } = makeOptions({
+			config: makeConfig({ buildGlobalContextIndex: true }),
+		});
+		client.recallEntries = [recallEntry("indexed result")];
+		let recallAttempts = 0;
+		client.recall = async function (request, signal) {
+			this.recallCalls.push({ request, signal });
+			recallAttempts += 1;
+			if (recallAttempts === 1) throw recallPrerequisitesError();
+			return this.recallEntries;
+		};
+		const state = new CogneeSessionState(options);
+
+		const result = await state.search("query");
+
+		expect(result.count).toBe(1);
+		expect(result.items[0]?.content).toBe("indexed result");
+		expect(client.recallCalls).toHaveLength(2);
+		expect(client.improveCalls).toHaveLength(1);
+		expect(client.improveCalls[0].request).toMatchObject({
+			datasetName: "omp",
+			sessionIds: ["session-1"],
+			runInBackground: false,
+			buildGlobalContextIndex: true,
+		});
+	});
+
+	it("transcript retention invalidates recovered recall prerequisites", async () => {
+		const session = makeSession([userMessage("turn 1"), assistantMessage("answer 1")]);
+		const { options, client } = makeOptions({
+			session,
+			config: makeConfig({ retainEveryNTurns: 1 }),
+		});
+		client.recallEntries = [recallEntry("indexed result")];
+		let recallAttempts = 0;
+		client.recall = async function (request, signal) {
+			this.recallCalls.push({ request, signal });
+			recallAttempts += 1;
+			if (recallAttempts === 1 || recallAttempts === 3) throw recallPrerequisitesError();
+			return this.recallEntries;
+		};
+		const state = new CogneeSessionState(options);
+
+		await state.search("before retain");
+		expect(client.improveCalls).toHaveLength(1);
+
+		await state.forceRetainCurrentSession();
+		await state.search("after retain");
+
+		expect(client.rememberCalls).toHaveLength(1);
+		expect(client.improveCalls).toHaveLength(2);
+		expect(client.recallCalls).toHaveLength(4);
+	});
+
 	it("save stores a single markdown memory with Source and Importance and returns ids", async () => {
 		const { options, client } = makeOptions();
 		const state = new CogneeSessionState(options);
@@ -666,7 +777,7 @@ describe("CogneeSessionState search and save", () => {
 		expect(result.ids).toEqual(["entry-1", "hash-1", "run-1"]);
 		expect(result.queued).toBe(true);
 		expect(client.rememberCalls).toHaveLength(1);
-		const data = String(client.rememberCalls[0].request.data);
+		const data = rememberDataContent(client.rememberCalls[0].request.data);
 		expect(data).toContain("important lesson");
 		expect(data).toContain("Source: tool");
 		expect(data).toContain("Importance: 5");
@@ -764,7 +875,7 @@ describe("CogneeSessionState session-end improve and lifecycle", () => {
 
 describe("CogneeSessionState alias behavior", () => {
 	it("alias construction exposes parent client, config, scope and keeps alias session/sessionId", () => {
-		const { options, session } = makeOptions();
+		const { options } = makeOptions();
 		const parent = new CogneeSessionState(options);
 		const aliasSession = makeSession();
 		const alias = new CogneeSessionState({
@@ -951,6 +1062,25 @@ describe("CogneeSessionState recallForCompaction", () => {
 		expect(result).toContain("<cognee_memories>");
 		expect(state.hasRecalledForFirstTurn).toBe(false);
 		expect(state.lastRecallSnippet).toBeUndefined();
+	});
+
+	it("recovers recall prerequisites for compaction context", async () => {
+		const { options, client } = makeOptions();
+		client.recallEntries = [recallEntry("compaction recovered note")];
+		let recallAttempts = 0;
+		client.recall = async function (request, signal) {
+			this.recallCalls.push({ request, signal });
+			recallAttempts += 1;
+			if (recallAttempts === 1) throw recallPrerequisitesError();
+			return this.recallEntries;
+		};
+		const state = new CogneeSessionState(options);
+
+		const result = await state.recallForCompaction([userMessage("compaction query")]);
+
+		expect(result).toContain("compaction recovered note");
+		expect(client.improveCalls).toHaveLength(1);
+		expect(client.recallCalls).toHaveLength(2);
 	});
 
 	it("returns undefined when no user message exists", async () => {

@@ -9,12 +9,12 @@ import type {
 	UsageReport,
 } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as memoryBackend from "@oh-my-pi/pi-coding-agent/memory-backend";
+import type { MemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/types";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 import { removeWithRetries, setProjectDir } from "@oh-my-pi/pi-utils";
-import * as memoryBackend from "@oh-my-pi/pi-coding-agent/memory-backend";
-import type { MemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/types";
 
 interface FakeAcpBuiltinSession {
 	fastMode: boolean;
@@ -1312,9 +1312,7 @@ describe("ACP /memory — Cognee backend routing", () => {
 
 		const result = await executeAcpBuiltinSlashCommand("/memory mm list", runtime);
 		expect(result).toEqual({ consumed: true });
-		expect(output.join("\n")).toContain(
-			"Mental-model maintenance via /memory mm is unsupported in ACP mode",
-		);
+		expect(output.join("\n")).toContain("Mental-model maintenance via /memory mm is unsupported in ACP mode");
 		expect(statsCalls).toHaveLength(0);
 		expect(diagnoseCalls).toHaveLength(0);
 		expect(clearCalls).toHaveLength(0);

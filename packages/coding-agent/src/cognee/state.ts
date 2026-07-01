@@ -1,30 +1,30 @@
-import { logger } from "@oh-my-pi/pi-utils";
+import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { logger } from "@oh-my-pi/pi-utils";
+import type { MemoryBackendSaveInput, MemoryBackendSaveResult, MemoryBackendSearchResult } from "../memory-backend";
 import type { AgentSession } from "../session/agent-session";
-import type {
-	MemoryBackendSaveInput,
-	MemoryBackendSaveResult,
-	MemoryBackendSearchResult,
-} from "../memory-backend";
-import type {
-	CogneeClient,
-	CogneeRecallEntry,
-	CogneeRecallRequest,
-	CogneeRememberRequest,
-	CogneeRememberResult,
+import {
+	type CogneeClient,
+	CogneeError,
+	type CogneeRecallEntry,
+	type CogneeRecallRequest,
+	type CogneeRememberDataItem,
+	type CogneeRememberRequest,
+	type CogneeRememberResult,
 } from "./client";
 import type { CogneeConfig } from "./config";
-import type { CogneeScope } from "./scope";
 import {
+	type CogneeMessage,
+	type CogneeRetentionDocument,
 	composeCogneeRecallQuery,
 	flattenMessagesForCognee,
+	formatCogneeDocumentFilename,
 	formatCogneeRecallBlock,
 	formatCogneeSearchItem,
 	prepareCogneeRetentionDocument,
 	truncateCogneeRecallQuery,
-	type CogneeMessage,
-	type CogneeRetentionDocument,
 } from "./content";
+import type { CogneeScope } from "./scope";
 
 const COGNEE_RETAIN_FLUSH_BATCH_SIZE = 16;
 const COGNEE_RETAIN_FLUSH_INTERVAL_MS = 5_000;
@@ -93,9 +93,7 @@ export interface CogneeSessionStateLike {
 	save(input: MemoryBackendSaveInput): Promise<MemoryBackendSaveResult>;
 }
 
-export function getCogneeSessionState(
-	session: AgentSession | undefined,
-): CogneeSessionStateLike | undefined {
+export function getCogneeSessionState(session: AgentSession | undefined): CogneeSessionStateLike | undefined {
 	return session ? (session as AgentSessionWithCogneeState)[kCogneeSessionState] : undefined;
 }
 
@@ -112,6 +110,17 @@ export function setCogneeSessionState(
 
 function errorText(err: unknown): string {
 	return err instanceof Error ? err.message : String(err);
+}
+
+function cogneeErrorDetailsText(details: unknown): string {
+	if (!details || typeof details !== "object") return "";
+	const record = details as Record<string, unknown>;
+	return [record.detail, record.message, record.error].filter(value => typeof value === "string").join("\n");
+}
+
+function isRecallPrerequisitesError(err: unknown): boolean {
+	if (!(err instanceof CogneeError) || err.status !== 404) return false;
+	return cogneeErrorDetailsText(err.details).toLowerCase().includes("recall prerequisites");
 }
 
 function buildRecallRequest(state: CogneeSessionState, query: string, topK: number): CogneeRecallRequest {
@@ -143,7 +152,6 @@ function buildRememberBaseRequest(state: CogneeSessionState): Omit<CogneeRemembe
 		chunksPerBatch: config.chunksPerBatch ?? undefined,
 		ontologyKeys: config.ontologyKeys,
 		graphModel: config.graphModel ?? undefined,
-		contentType: "text/markdown",
 	};
 }
 
@@ -171,25 +179,43 @@ function formatScopeHeader(state: CogneeSessionState): string[] {
 	return lines;
 }
 
-function formatExplicitRetainDocument(state: CogneeSessionState, item: PendingCogneeRetainItem): string {
+function cogneeDocumentLabel(state: CogneeSessionState): string {
+	return path.basename(state.session.sessionManager.getCwd()) || "unknown";
+}
+
+function cogneeDocumentFilename(state: CogneeSessionState, retainedAt: Date, suffix?: string): string {
+	return formatCogneeDocumentFilename(retainedAt, cogneeDocumentLabel(state), suffix);
+}
+
+function formatExplicitRetainDocument(
+	state: CogneeSessionState,
+	item: PendingCogneeRetainItem,
+	suffix?: string,
+): CogneeRememberDataItem {
 	const header = formatScopeHeader(state);
 	header.push(`Retained at: ${item.timestamp.toISOString()}`);
 	header.push(`Context: ${item.context ?? state.config.retainContext}`);
 	header.push(`Source: explicit-retain`);
-	return `${header.join("\n")}\n\n${item.content}`;
+	return {
+		content: `${header.join("\n")}\n\n${item.content}`,
+		filename: cogneeDocumentFilename(state, item.timestamp, suffix),
+	};
 }
 
 function formatSaveDocument(
 	state: CogneeSessionState,
 	input: MemoryBackendSaveInput,
 	retainedAt: Date,
-): string {
+): CogneeRememberDataItem {
 	const header = formatScopeHeader(state);
 	header.push(`Retained at: ${retainedAt.toISOString()}`);
 	header.push(`Context: ${input.context ?? state.config.retainContext}`);
 	if (input.source) header.push(`Source: ${input.source}`);
 	if (typeof input.importance === "number") header.push(`Importance: ${input.importance}`);
-	return `${header.join("\n")}\n\n${input.content}`;
+	return {
+		content: `${header.join("\n")}\n\n${input.content}`,
+		filename: cogneeDocumentFilename(state, retainedAt),
+	};
 }
 
 function rememberIds(result: CogneeRememberResult): string[] | undefined {
@@ -327,9 +353,15 @@ class CogneeRetainQueue {
 		}
 
 		try {
-			const documents = items.map(item => formatExplicitRetainDocument(state, item));
+			const documents = items.map((item, index) =>
+				formatExplicitRetainDocument(
+					state,
+					item,
+					items.length > 1 ? String(index + 1).padStart(2, "0") : undefined,
+				),
+			);
 			const base = buildRememberBaseRequest(state);
-			await state.client.remember({ ...base, data: documents, contentType: "text/markdown" });
+			await state.client.remember({ ...base, data: documents });
 			if (state.config.debug) {
 				logger.debug("Cognee retain queue: batch flushed", {
 					sessionId: state.sessionId,
@@ -376,9 +408,10 @@ export class CogneeSessionState implements CogneeSessionStateLike {
 
 	#retainQueue?: CogneeRetainQueue;
 	#unsubscribe?: () => void;
-	#disposed = false;
 	#improveAttempted = false;
 	#disposePromise?: Promise<void>;
+	#recallPrereqRecovery?: Promise<void>;
+	#recallPrereqRecovered = false;
 
 	constructor(options: CogneeSessionStateOptions) {
 		this.session = options.session;
@@ -425,7 +458,55 @@ export class CogneeSessionState implements CogneeSessionStateLike {
 			this.aliasOf.enqueueRetain(content, context);
 			return;
 		}
+		this.#resetRecallPrereqRecovery();
 		this.#retainQueue?.enqueue(content, context);
+	}
+	#resetRecallPrereqRecovery(): void {
+		this.#recallPrereqRecovery = undefined;
+		this.#recallPrereqRecovered = false;
+	}
+
+	#abortError(signal: AbortSignal): Error {
+		const reason = signal.reason;
+		return reason instanceof Error ? reason : new DOMException("Aborted", "AbortError");
+	}
+
+	async #recoverRecallPrerequisites(signal?: AbortSignal): Promise<void> {
+		if (this.#recallPrereqRecovered) return;
+		if (signal?.aborted) throw this.#abortError(signal);
+		this.#recallPrereqRecovery ??= this.client
+			.improve(
+				{
+					datasetName: this.scope.datasetName,
+					datasetId: this.scope.datasetId,
+					sessionIds: this.config.sessionMemoryEnabled ? [this.sessionId] : undefined,
+					nodeName: this.scope.recallNodeName,
+					runInBackground: false,
+					buildGlobalContextIndex: this.config.buildGlobalContextIndex,
+				},
+				signal,
+			)
+			.then(() => {
+				this.#recallPrereqRecovered = true;
+			})
+			.finally(() => {
+				this.#recallPrereqRecovery = undefined;
+			});
+		await this.#recallPrereqRecovery;
+	}
+
+	async #recallWithPrerequisiteRecovery(
+		request: CogneeRecallRequest,
+		signal?: AbortSignal,
+	): Promise<CogneeRecallEntry[]> {
+		try {
+			return await this.client.recall(request, signal);
+		} catch (err) {
+			if (!isRecallPrerequisitesError(err)) throw err;
+			await this.#recoverRecallPrerequisites(signal);
+			if (signal?.aborted) throw this.#abortError(signal);
+			return await this.client.recall(request, signal);
+		}
 	}
 
 	flushRetainQueue(): Promise<void> {
@@ -441,7 +522,7 @@ export class CogneeSessionState implements CogneeSessionStateLike {
 		}
 		try {
 			const request = buildRecallRequest(this, query, this.config.recallTopK);
-			const entries: CogneeRecallEntry[] = await this.client.recall(request, signal);
+			const entries: CogneeRecallEntry[] = await this.#recallWithPrerequisiteRecovery(request, signal);
 			if (signal?.aborted) return { context: null, ok: false };
 			const block = formatCogneeRecallBlock(entries, this.config, this.scope);
 			return { context: block ?? null, ok: true };
@@ -533,11 +614,13 @@ export class CogneeSessionState implements CogneeSessionStateLike {
 			retainEveryNTurns,
 			retainOverlapTurns,
 			scope: this.scope,
+			documentLabel: cogneeDocumentLabel(this),
 		});
 		if (!document) return { retained: false, userTurns };
 
 		const base = buildRememberBaseRequest(this);
-		await this.client.remember({ ...base, data: document.content, contentType: document.contentType });
+		await this.client.remember({ ...base, data: { content: document.content, filename: document.filename } });
+		this.#resetRecallPrereqRecovery();
 		return { retained: true, userTurns };
 	}
 
@@ -614,10 +697,7 @@ export class CogneeSessionState implements CogneeSessionStateLike {
 		});
 	}
 
-	async search(
-		query: string,
-		options?: { limit?: number; signal?: AbortSignal },
-	): Promise<MemoryBackendSearchResult> {
+	async search(query: string, options?: { limit?: number; signal?: AbortSignal }): Promise<MemoryBackendSearchResult> {
 		if (this.aliasOf) {
 			return this.aliasOf.search(query, options);
 		}
@@ -632,9 +712,9 @@ export class CogneeSessionState implements CogneeSessionStateLike {
 			};
 		}
 
+		const request = buildRecallRequest(this, trimmed, options?.limit ?? this.config.recallTopK);
 		try {
-			const request = buildRecallRequest(this, trimmed, options?.limit ?? this.config.recallTopK);
-			const entries = await this.client.recall(request, options?.signal);
+			const entries = await this.#recallWithPrerequisiteRecovery(request, options?.signal);
 			const items = entries.map(formatCogneeSearchItem);
 			return { backend: COGNEE_BACKEND, query: trimmed, count: items.length, items };
 		} catch (err) {
@@ -669,7 +749,8 @@ export class CogneeSessionState implements CogneeSessionStateLike {
 		try {
 			const document = formatSaveDocument(this, input, retainedAt);
 			const base = buildRememberBaseRequest(this);
-			const result = await this.client.remember({ ...base, data: document, contentType: "text/markdown" });
+			const result = await this.client.remember({ ...base, data: document });
+			this.#resetRecallPrereqRecovery();
 			return {
 				backend: COGNEE_BACKEND,
 				stored: 1,
@@ -714,25 +795,14 @@ export class CogneeSessionState implements CogneeSessionStateLike {
 			}
 		}
 	}
-
 	dispose(): void | Promise<void> {
-		if (this.aliasOf) {
-			this.#disposed = true;
-			return;
-		}
+		if (this.aliasOf) return;
 		if (this.#disposePromise) return this.#disposePromise;
 
 		this.#disposePromise = (async () => {
-			// 1. Mark disposed so new enqueues are rejected by the queue.
-			this.#disposed = true;
-			// 2. Unsubscribe the session listener.
 			this.#unsubscribe?.();
 			this.#unsubscribe = undefined;
-			// 3. Stop the debounce timer without dropping items yet.
 			this.#retainQueue?.close();
-			// 4. Drain pending explicit retains while the state is still
-			//    installed on the session. If a caller already cleared the
-			//    side channel, the queue identity guard drops the batch.
 			if (getCogneeSessionState(this.session) === this) {
 				try {
 					await this.flushRetainQueue();
@@ -740,9 +810,7 @@ export class CogneeSessionState implements CogneeSessionStateLike {
 					logger.warn("Cognee: dispose flush failed", { sessionId: this.sessionId, error: errorText(err) });
 				}
 			}
-			// 5. Best-effort session-end improve.
 			await this.#maybeImproveOnDispose();
-			// 6. Drop any remaining queue state.
 			this.#retainQueue?.drop();
 		})();
 		return this.#disposePromise;

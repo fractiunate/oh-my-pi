@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Named Cognee memory uploads with datetime/current-folder filenames instead of anonymous `upload_N` document names.
+
 ## [16.2.7] - 2026-06-30
 
 ### Breaking Changes

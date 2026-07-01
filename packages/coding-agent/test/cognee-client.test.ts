@@ -12,13 +12,17 @@ function rejectingFetch(error: Error): typeof fetch {
 }
 
 function jsonBody(call: RecordedCogneeRequest): Record<string, unknown> {
-	expect(call.body?.kind).toBe("json");
-	return call.body.value as Record<string, unknown>;
+	const body = call.body;
+	expect(body?.kind).toBe("json");
+	if (body?.kind !== "json") throw new Error("Expected JSON body");
+	return body.value as Record<string, unknown>;
 }
 
 function formBody(call: RecordedCogneeRequest): Record<string, RecordedCogneeFormValue[]> {
-	expect(call.body?.kind).toBe("form");
-	return call.body.fields;
+	const body = call.body;
+	expect(body?.kind).toBe("form");
+	if (body?.kind !== "form") throw new Error("Expected form body");
+	return body.fields;
 }
 
 describe("Cognee HTTP client", () => {
@@ -49,16 +53,18 @@ describe("Cognee HTTP client", () => {
 		expect(call?.path).toBe("/api/v1/remember");
 		expect(call?.method).toBe("POST");
 		expect(call?.signal).toBe(abort.signal);
-		expect(call?.headers["accept"]).toBe("application/json");
+		expect(call?.headers.accept).toBe("application/json");
 		expect(call?.headers["user-agent"]).toBe("oh-my-pi-coding-agent");
 		expect(call?.headers["content-type"]).toBeUndefined();
 		const form = formBody(call as RecordedCogneeRequest);
 		expect(form.data.length).toBe(3);
-		expect(form.data[0]).toBe("first");
-		expect(form.data[1]).toBe("second");
+		const firstBlob = form.data[0] as { kind: string; type: string; size: number; text?: string };
+		const secondBlob = form.data[1] as { kind: string; type: string; size: number; text?: string };
+		expect(firstBlob).toMatchObject({ kind: "blob", type: "text/plain;charset=utf-8", text: "first" });
+		expect(secondBlob).toMatchObject({ kind: "blob", type: "text/plain;charset=utf-8", text: "second" });
 		const dataBlob = form.data[2] as { kind: string; type: string; size: number };
 		expect(dataBlob.kind).toBe("blob");
-		expect(dataBlob.type.startsWith("text/plain")).toBe(true);
+		expect(dataBlob.type.startsWith("application/octet-stream")).toBe(true);
 		expect(dataBlob.size).toBe(2);
 		expect(form.datasetName[0]).toBe("main");
 		expect(form.datasetId[0]).toBe("dataset-id");
@@ -80,7 +86,7 @@ describe("Cognee HTTP client", () => {
 		await client.remember({ data: "memory" });
 
 		expect(requests[0]?.headers["x-api-key"]).toBe("secret");
-		expect(requests[0]?.headers["authorization"]).toBeUndefined();
+		expect(requests[0]?.headers.authorization).toBeUndefined();
 	});
 
 	it("sends Authorization only when apiKey is absent", async () => {
@@ -89,7 +95,7 @@ describe("Cognee HTTP client", () => {
 
 		await client.remember({ data: "memory" });
 
-		expect(requests[0]?.headers["authorization"]).toBe("Bearer bearer");
+		expect(requests[0]?.headers.authorization).toBe("Bearer bearer");
 		expect(requests[0]?.headers["x-api-key"]).toBeUndefined();
 	});
 
@@ -105,7 +111,7 @@ describe("Cognee HTTP client", () => {
 		await client.remember({ data: "memory" });
 
 		expect(requests[0]?.headers["x-api-key"]).toBe("secret");
-		expect(requests[0]?.headers["authorization"]).toBeUndefined();
+		expect(requests[0]?.headers.authorization).toBeUndefined();
 	});
 
 	it("remember normalizes snake_case fields and preserves raw", async () => {
@@ -234,7 +240,7 @@ describe("Cognee HTTP client", () => {
 
 		const entries = await client.recall({ query: "q" });
 
-		expect(entries.map((entry) => entry.source)).toEqual([
+		expect(entries.map(entry => entry.source)).toEqual([
 			"session",
 			"trace",
 			"graph_context",
@@ -336,9 +342,7 @@ describe("Cognee HTTP client", () => {
 		]);
 		const client = createCogneeClient({ baseUrl: "http://cognee.local", fetch });
 
-		await expect(client.listDatasets()).resolves.toMatchObject([
-			{ id: "id-1", name: "main", status: "ready" },
-		]);
+		await expect(client.listDatasets()).resolves.toMatchObject([{ id: "id-1", name: "main", status: "ready" }]);
 		await expect(client.listDatasets()).resolves.toMatchObject([{ id: "id-2", name: "other" }]);
 		expect(requests[0]?.method).toBe("GET");
 		expect(requests[0]?.path).toBe("/api/v1/datasets");
