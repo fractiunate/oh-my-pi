@@ -114,6 +114,7 @@ interface EditRenderArgs {
 	newText?: string;
 	patch?: string;
 	input?: string;
+	_input?: string;
 	all?: boolean;
 	// Patch mode fields
 	op?: Operation;
@@ -600,10 +601,11 @@ function getHashlineInputRenderSummary(
 	args: EditRenderArgs,
 	editMode: EditMode | undefined,
 ): HashlineInputRenderSummary | undefined {
-	if (editMode !== "hashline" || typeof args.input !== "string") {
+	const input = args.input ?? args._input;
+	if (editMode !== "hashline" || typeof input !== "string") {
 		return undefined;
 	}
-	return { entries: getHashlineInputSections(args.input) };
+	return { entries: getHashlineInputSections(input) };
 }
 
 function getApplyPatchRenderSummary(
@@ -694,11 +696,6 @@ function wrapEditRendererLine(line: string, width: number): string[] {
 
 export const editToolRenderer = {
 	mergeCallAndResult: true,
-	// Pending preview is a TAIL window of the streamed diff ("… N more lines
-	// above" + last rows); the result render re-anchors the block top-first, so
-	// committing the preview's settled head would strand a stale call-box
-	// fragment in native scrollback.
-	provisionalPendingPreview: true,
 
 	renderCall(
 		args: EditRenderArgs,

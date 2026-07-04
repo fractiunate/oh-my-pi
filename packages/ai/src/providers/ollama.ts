@@ -23,7 +23,7 @@ import {
 	getOpenAIStreamFirstEventTimeoutMs,
 	getOpenAIStreamIdleTimeoutMs,
 } from "../utils/idle-iterator";
-import { toolWireSchema } from "../utils/schema/wire";
+import { sanitizeSchemaForOllama, toolWireSchema } from "../utils/schema";
 import {
 	getStreamMarkupHealingPattern,
 	type HealedToolCall,
@@ -280,7 +280,7 @@ function convertTools(tools: Tool[] | undefined): OllamaFunctionTool[] | undefin
 		function: {
 			name: tool.name,
 			description: tool.description,
-			parameters: toolWireSchema(tool),
+			parameters: sanitizeSchemaForOllama(toolWireSchema(tool)),
 		},
 	}));
 }
@@ -321,6 +321,10 @@ function createChatBody(model: Model<"ollama-chat">, context: Context, options: 
 			: {}),
 		stream: true,
 	};
+}
+
+function shouldRetryOllamaResponse(response: Response, bodyText: string): boolean {
+	return response.status < 500 || !AIError.LLAMA_CPP_TOOL_CALL_PARSE_PATTERN.test(bodyText);
 }
 
 async function captureHttpErrorResponse(response: Response): Promise<CapturedHttpErrorResponse> {
@@ -598,6 +602,7 @@ export const streamOllama: StreamFunction<"ollama-chat"> = (
 					body: JSON.stringify(body),
 					signal: watchdog.signal,
 					defaultDelayMs: OLLAMA_RETRY_DELAYS_MS,
+					shouldRetryResponse: shouldRetryOllamaResponse,
 					fetch: options.fetch,
 					timeout: false,
 				});
@@ -747,6 +752,7 @@ export const streamOllama: StreamFunction<"ollama-chat"> = (
 			}
 			const result = await AIError.finalize(error, {
 				api: model.api,
+				provider: model.provider,
 				signal: options.signal,
 				rawRequestDump,
 				capturedErrorResponse,

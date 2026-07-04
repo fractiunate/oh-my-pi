@@ -25,7 +25,7 @@ import type { ZodType, z } from "zod/v4";
 import type { ApiKey } from "./auth-retry";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
-import type { StopDetails } from "./providers/anthropic-wire";
+import type { FallbackParam, StopDetails } from "./providers/anthropic-wire";
 import type { AzureOpenAIResponsesOptions } from "./providers/azure-openai-responses";
 import type { CursorOptions } from "./providers/cursor";
 import type { DevinOptions } from "./providers/devin";
@@ -523,6 +523,13 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	openrouterVariant?: string;
 	/** Antigravity endpoint routing mode: "auto" (default with failover), "production", "sandbox". */
 	antigravityEndpointMode?: "auto" | "production" | "sandbox";
+	/**
+	 * Anthropic `server-side-fallback-2026-06-01` fallback chain (top-level
+	 * `fallbacks` request field). Opt-in ONLY — leaving this undefined is
+	 * the default and preserves the pre-fallback behavior on every
+	 * provider. Non-Anthropic providers ignore the field.
+	 */
+	fallbacks?: FallbackParam[];
 }
 
 // Generic StreamFunction with typed options
@@ -554,6 +561,20 @@ export interface ThinkingContent {
 export interface RedactedThinkingContent {
 	type: "redactedThinking";
 	data: string;
+}
+
+/**
+ * Anthropic server-side-fallback boundary marker persisted on assistant
+ * turns whose provider request opted into
+ * `AnthropicOptions.fallbacks`. Consumers other than the Anthropic
+ * provider MUST ignore it — `transformMessages` strips the block on any
+ * cross-provider hop and on non-official Anthropic replays, so downstream
+ * converters never see it.
+ */
+export interface AnthropicFallbackContent {
+	type: "fallback";
+	from: { model: string };
+	to: { model: string };
 }
 
 export interface ImageContent {
@@ -626,6 +647,23 @@ export interface DeveloperMessage {
 	timestamp: number; // Unix timestamp in milliseconds
 }
 
+export type AssistantRetryRecoveryKind = "credential" | "model" | "wait" | "plain";
+
+export interface AssistantRetryRecovery {
+	kind: "auto-retry";
+	status: "recovered";
+	attempt: number;
+	recoveredAt: string;
+	recovery: AssistantRetryRecoveryKind;
+	note: string;
+	supersededBy?: {
+		timestamp: number;
+		responseId?: string;
+		provider: string;
+		model: string;
+	};
+}
+
 export interface ContextSnapshot {
 	promptTokens: number; // authoritative provider prompt/input tokens
 	nonMessageTokens: number; // estimated non-message total at send time
@@ -634,11 +672,12 @@ export interface ContextSnapshot {
 
 export interface AssistantMessage {
 	role: "assistant";
-	content: (TextContent | ThinkingContent | RedactedThinkingContent | ToolCall)[];
+	content: (TextContent | ThinkingContent | RedactedThinkingContent | AnthropicFallbackContent | ToolCall)[];
 	api: Api;
 	provider: Provider;
 	model: string;
 	contextSnapshot?: ContextSnapshot;
+	retryRecovery?: AssistantRetryRecovery;
 	responseId?: string; // Provider-specific response/message identifier when the upstream API exposes one
 	/**
 	 * Name of the upstream provider an aggregator routed this request to, as

@@ -8,7 +8,13 @@ import { type Component, replaceTabs, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { getMCPConfigPath, getProjectDir } from "@oh-my-pi/pi-utils";
 import type { SourceMeta } from "../../capability/types";
 import { expandEnvVarsDeep } from "../../discovery/helpers";
-import { analyzeAuthError, discoverOAuthEndpoints, loadAllMCPConfigs, MCPManager } from "../../mcp";
+import {
+	analyzeAuthError,
+	discoverOAuthEndpoints,
+	fetchResourceMetadataScopes,
+	loadAllMCPConfigs,
+	MCPManager,
+} from "../../mcp";
 import { connectToServer, disconnectServer, listTools } from "../../mcp/client";
 import {
 	addMCPServer,
@@ -43,6 +49,7 @@ import {
 import type { MCPAuthConfig, MCPServerConfig, MCPServerConnection } from "../../mcp/types";
 import { shortenPath } from "../../tools/render-utils";
 import { urlHyperlinkAlways } from "../../tui";
+import { copyToClipboard } from "../../utils/clipboard";
 import { openPath } from "../../utils/open";
 import { ChatBlock } from "../components/chat-block";
 import { MCPAddWizard } from "../components/mcp-add-wizard";
@@ -62,24 +69,88 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string,
 	}, timeoutMs);
 	return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timer));
 }
+function raceAbortSignal<T>(promise: Promise<T>, signal: AbortSignal, createError: () => Error): Promise<T> {
+	if (signal.aborted) return Promise.reject(createError());
 
-/** Renders the MCP OAuth fallback URL without hard-wrapping the copy target. */
+	const aborted = Promise.withResolvers<never>();
+	const onAbort = (): void => aborted.reject(createError());
+	signal.addEventListener("abort", onAbort, { once: true });
+	return Promise.race([promise, aborted.promise]).finally(() => {
+		signal.removeEventListener("abort", onAbort);
+	});
+}
+
+/**
+ * Minimum column budget for URL wrapping. Below this the terminal is
+ * effectively unusable, but we still emit chunks so no character is silently
+ * dropped and the user can widen and reflow.
+ */
+const MCP_AUTH_MIN_WRAP_WIDTH = 16;
+
+/**
+ * Wrap `url` into rows that each fit inside `width`, prefixed by a shared
+ * single-column indent so nested composition doesn't touch column 0. When the
+ * label + URL fit on one line, returns a single row; otherwise puts the label
+ * on its own row and slices the URL into fixed-width chunks. URL chunks are
+ * plain code points — browsers strip whitespace when pasted into the address
+ * bar, so a multi-row selection copies back to the intact URL.
+ */
+function wrapUrlRows(label: string, url: string, width: number): string[] {
+	const indent = " ";
+	const sanitized = replaceTabs(url);
+	const effective = Math.max(MCP_AUTH_MIN_WRAP_WIDTH, Math.trunc(width));
+	const inlineWidth = indent.length + label.length + 1 + sanitized.length;
+	if (inlineWidth <= effective) {
+		return [`${indent}${theme.fg("muted", `${label} ${sanitized}`)}`];
+	}
+	const chunkWidth = Math.max(1, effective - indent.length);
+	const rows: string[] = [`${indent}${theme.fg("muted", label)}`];
+	for (let i = 0; i < sanitized.length; i += chunkWidth) {
+		rows.push(`${indent}${theme.fg("muted", sanitized.slice(i, i + chunkWidth))}`);
+	}
+	return rows;
+}
+
+/**
+ * Renders the MCP OAuth fallback URL. Always shows the full authorization URL
+ * as the primary `Copy URL:` target — that works from any machine, including
+ * SSH/WSL/headless sessions where the OMP-hosted `/launch` loopback URL would
+ * resolve against the user's local browser and fail.
+ *
+ * The render is `width`-aware: on any viewport narrower than the composed row
+ * ({@link TUI#prepareLine} truncates anything wider with `Ellipsis.Omit`, no
+ * marker), the URL is hard-wrapped into width-fitted rows so the primary copy
+ * target can never silently lose trailing OAuth parameters — the failure mode
+ * that motivated #4418 in the first place. Browsers strip whitespace when a
+ * multi-row selection is pasted into the address bar, so the reassembled URL
+ * is byte-identical to what we rendered.
+ *
+ * When the flow's callback server hosts a short `launchUrl`, it is offered
+ * as an additional local shortcut for wide-terminal local users. The OSC 8
+ * hyperlink continues to carry the full URL for terminals that support it.
+ */
 export class MCPAuthorizationLinkPrompt implements Component {
-	readonly #url: string;
+	readonly #fullUrl: string;
+	readonly #launchUrl: string | undefined;
 
-	constructor(url: string) {
-		this.#url = url;
+	constructor(url: string, launchUrl?: string) {
+		this.#fullUrl = url;
+		this.#launchUrl = launchUrl && launchUrl !== url ? launchUrl : undefined;
 	}
 
 	invalidate(): void {}
 
-	render(_width: number): readonly string[] {
-		const link = urlHyperlinkAlways(this.#url, "Click here to authorize");
-		return [
+	render(width: number): readonly string[] {
+		const link = urlHyperlinkAlways(this.#fullUrl, "Click here to authorize");
+		const lines: string[] = [
 			` ${theme.fg("success", "Open authorization URL:")}`,
 			` ${theme.fg("accent", link)}`,
-			` ${theme.fg("muted", `Copy URL: ${replaceTabs(this.#url)}`)}`,
+			...wrapUrlRows("Copy URL:", this.#fullUrl, width),
 		];
+		if (this.#launchUrl) {
+			lines.push(...wrapUrlRows("Local shortcut (this machine only):", this.#launchUrl, width));
+		}
+		return lines;
 	}
 }
 
@@ -134,6 +205,22 @@ interface OAuthFlowResult {
 	clientId?: string;
 	resource?: string;
 }
+
+/**
+ * Thrown by {@link MCPCommandController}'s OAuth handler when the user (or a
+ * caller-supplied {@link AbortSignal}) cancels the in-flight flow. Distinct
+ * from network/timeout failures so callers can surface a neutral
+ * "cancelled" status instead of an error banner.
+ */
+export class MCPOAuthCancelledError extends Error {
+	constructor(message = "OAuth flow cancelled") {
+		super(message);
+		this.name = "MCPOAuthCancelledError";
+	}
+}
+
+/** Reason recorded on the OAuth flow's AbortController when the user hits Esc. */
+const MCP_OAUTH_USER_CANCEL_REASON = "MCP OAuth flow cancelled by user";
 
 type MCPAddScope = "user" | "project";
 type MCPAddTransport = "http" | "sse";
@@ -480,10 +567,17 @@ export class MCPCommandController {
 									finalConfig.url,
 									authResult.authServerUrl,
 									authResult.resourceMetadataUrl,
+									{ protectedScopes: authResult.scopes },
 								);
 							} catch {
 								// Ignore discovery error and handle below.
 							}
+						}
+						if (oauth && !oauth.scopes && authResult.resourceMetadataUrl) {
+							// JSON-error-body path skips `discoverOAuthEndpoints`; fetch the
+							// advertised protected-resource metadata for the required scopes.
+							const scopes = await fetchResourceMetadataScopes(authResult.resourceMetadataUrl);
+							if (scopes) oauth = { ...oauth, scopes };
 						}
 
 						if (!oauth) {
@@ -521,6 +615,10 @@ export class MCPCommandController {
 								userClientSecret: finalConfig.oauth?.clientSecret,
 							});
 						} catch (oauthError) {
+							if (oauthError instanceof MCPOAuthCancelledError) {
+								this.ctx.showStatus(`Add cancelled for "${parsed.initialName}"`);
+								return;
+							}
 							this.ctx.showError(
 								`OAuth flow failed for "${parsed.initialName}": ${oauthError instanceof Error ? oauthError.message : String(oauthError)}`,
 							);
@@ -587,6 +685,14 @@ export class MCPCommandController {
 			serverUrl?: string;
 			resource?: string;
 			stripSameOriginResource?: boolean;
+			/**
+			 * External cancellation source: when this signal aborts, the in-flight
+			 * OAuth flow is torn down and {@link MCPOAuthCancelledError} is thrown.
+			 * Wizards (which own focus and absorb Esc themselves) pass their own
+			 * controller here; editor-focused callers rely on the Esc hook
+			 * installed below instead.
+			 */
+			abortSignal?: AbortSignal;
 		},
 	): Promise<OAuthFlowResult> {
 		const authStorage = this.ctx.session.modelRegistry.authStorage;
@@ -614,6 +720,26 @@ export class MCPCommandController {
 		}
 		let manualInputClaim: { promise: Promise<string>; clear: (reason?: string) => void } | undefined;
 		const oauthTimeout = new AbortController();
+		// User Esc and external aborts route through here; the timeout path sets
+		// its own reason and leaves this flag false so the catch can distinguish
+		// "user cancelled" (status) from "deadline elapsed" (error).
+		let userCancelled = false;
+		const requestUserCancel = (reason: string): void => {
+			userCancelled = true;
+			if (!oauthTimeout.signal.aborted) oauthTimeout.abort(reason);
+		};
+		const originalOnEscape = this.ctx.editor.onEscape;
+		this.ctx.editor.onEscape = () => requestUserCancel(MCP_OAUTH_USER_CANCEL_REASON);
+		const externalSignal = opts?.abortSignal;
+		const onExternalAbort = (): void => {
+			const reason = externalSignal?.reason;
+			requestUserCancel(typeof reason === "string" ? reason : MCP_OAUTH_USER_CANCEL_REASON);
+		};
+		if (externalSignal?.aborted) {
+			onExternalAbort();
+		} else {
+			externalSignal?.addEventListener("abort", onExternalAbort, { once: true });
+		}
 		try {
 			// Create OAuth flow
 			const flow = new MCPOAuthFlow(
@@ -631,7 +757,7 @@ export class MCPCommandController {
 					stripSameOriginResource: opts?.stripSameOriginResource,
 				},
 				{
-					onAuth: (info: { url: string; instructions?: string }) => {
+					onAuth: (info: { url: string; launchUrl?: string; instructions?: string }) => {
 						// Show auth URL prominently in chat as one block
 						const block = new TranscriptBlock();
 						this.ctx.present(block);
@@ -641,7 +767,7 @@ export class MCPCommandController {
 						block.addChild(new Spacer(1));
 						block.addChild(
 							new Text(
-								theme.fg("muted", "Waiting for authorization... (Press Ctrl+C to cancel, 5 minute timeout)"),
+								theme.fg("muted", "Waiting for authorization... (Press Esc to cancel, 5 minute timeout)"),
 								1,
 								0,
 							),
@@ -649,24 +775,25 @@ export class MCPCommandController {
 						block.addChild(new Text(theme.fg("muted", MCP_MANUAL_LOGIN_TIP), 1, 0));
 						block.addChild(new Spacer(1));
 						block.addChild(new Text(theme.fg("accent", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"), 1, 0));
-						// Try to open browser automatically
-						try {
-							openPath(info.url);
-
-							// Show confirmation that browser should open
-							block.addChild(new Spacer(1));
-							block.addChild(new Text(theme.fg("success", "→ Opening browser automatically..."), 1, 0));
-							block.addChild(new Spacer(1));
-							block.addChild(new Text(theme.fg("muted", "Alternative if browser did not open:"), 1, 0));
-							block.addChild(new MCPAuthorizationLinkPrompt(info.url));
-							this.ctx.ui.requestRender();
-						} catch (_error) {
-							// Show error if browser doesn't open
-							block.addChild(new Spacer(1));
-							block.addChild(new Text(theme.fg("warning", "→ Could not open browser automatically"), 1, 0));
-							block.addChild(new MCPAuthorizationLinkPrompt(info.url));
-							this.ctx.ui.requestRender();
-						}
+						// `openPath` is best-effort — it logs spawn failures but never
+						// throws, so we always render the copy-URL fallback beneath the
+						// "attempting to open browser" line and no earlier try/catch is
+						// worth keeping.
+						openPath(info.url);
+						// Stage the FULL authorization URL on the clipboard via OSC 52.
+						// The full URL works from any machine (unlike `launchUrl`, which
+						// only resolves against the OMP host), and OSC 52 is a
+						// wire-level protocol — the terminal writes it to the user's
+						// LOCAL clipboard even when OMP is on a remote SSH box.
+						// Best-effort: falls back to the visible copy-URL rows below
+						// whether or not the terminal honors OSC 52.
+						void copyToClipboard(info.url).catch(() => {});
+						block.addChild(new Spacer(1));
+						block.addChild(new Text(theme.fg("success", "→ Attempting to open browser..."), 1, 0));
+						block.addChild(new Spacer(1));
+						block.addChild(new Text(theme.fg("muted", "Alternative if browser did not open:"), 1, 0));
+						block.addChild(new MCPAuthorizationLinkPrompt(info.url, info.launchUrl));
+						this.ctx.ui.requestRender();
 					},
 					onProgress: (message: string) => {
 						this.ctx.present([new Spacer(1), new Text(theme.fg("muted", message), 1, 0)]);
@@ -687,9 +814,18 @@ export class MCPCommandController {
 				},
 			);
 
-			// Execute OAuth flow with 5 minute timeout
+			const createAbortError = (): Error => {
+				const reason = String(oauthTimeout.signal.reason ?? "MCP OAuth flow aborted");
+				return userCancelled ? new MCPOAuthCancelledError() : new Error(reason);
+			};
+			if (oauthTimeout.signal.aborted) throw createAbortError();
+
+			// Execute OAuth flow with 5 minute timeout. Race the login itself
+			// against the abort signal because Esc/external abort may fire before
+			// MCPOAuthFlow reaches OAuthCallbackFlow.#waitForCallback, where the
+			// underlying callback server normally observes the signal.
 			const credentials = await withTimeout(
-				flow.login(),
+				raceAbortSignal(flow.login(), oauthTimeout.signal, createAbortError),
 				5 * 60 * 1000,
 				"OAuth flow timed out after 5 minutes",
 				() => oauthTimeout.abort("MCP OAuth flow timed out"),
@@ -727,6 +863,14 @@ export class MCPCommandController {
 				resource: flow.resource,
 			};
 		} catch (error) {
+			// User-initiated cancel (Esc or external signal) → neutral status, not
+			// a failure. Check the flag we set in `requestUserCancel`, not the
+			// abort reason: the timeout path also aborts but with a different
+			// reason, and we want it to surface as a timeout error below.
+			if (userCancelled) {
+				throw new MCPOAuthCancelledError();
+			}
+
 			const errorMsg = error instanceof Error ? error.message : String(error);
 
 			// Provide helpful error messages based on failure type
@@ -742,6 +886,8 @@ export class MCPCommandController {
 				throw new Error(`OAuth authentication failed: ${errorMsg}`);
 			}
 		} finally {
+			this.ctx.editor.onEscape = originalOnEscape;
+			externalSignal?.removeEventListener("abort", onExternalAbort);
 			manualInputClaim?.clear("Manual MCP OAuth input cleared");
 		}
 	}
@@ -933,7 +1079,15 @@ export class MCPCommandController {
 		let oauth = authResult.authType === "oauth" ? (authResult.oauth ?? null) : null;
 
 		if (!oauth && (config.type === "http" || config.type === "sse") && config.url) {
-			oauth = await discoverOAuthEndpoints(config.url, authResult.authServerUrl, authResult.resourceMetadataUrl);
+			oauth = await discoverOAuthEndpoints(config.url, authResult.authServerUrl, authResult.resourceMetadataUrl, {
+				protectedScopes: authResult.scopes,
+			});
+		}
+		if (oauth && !oauth.scopes && authResult.resourceMetadataUrl) {
+			// JSON-error-body path skips `discoverOAuthEndpoints`; fetch the
+			// advertised protected-resource metadata for the required scopes.
+			const scopes = await fetchResourceMetadataScopes(authResult.resourceMetadataUrl);
+			if (scopes) oauth = { ...oauth, scopes };
 		}
 
 		if (!oauth) {
@@ -1629,6 +1783,10 @@ export class MCPCommandController {
 			];
 			this.#showMessage(lines.join("\n"));
 		} catch (error) {
+			if (error instanceof MCPOAuthCancelledError) {
+				this.ctx.showStatus(`Reauthorization cancelled for "${name}"`);
+				return;
+			}
 			this.ctx.showError(`Failed to reauthorize server: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
